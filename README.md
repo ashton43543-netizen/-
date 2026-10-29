@@ -24,3 +24,7 @@
 ## 2인 미니 축구 · Unity 2D (`unity-soccer/`)
 
 같은 축구 게임을 유니티로 옮긴 버전입니다. 실행 방법은 [`unity-soccer/README.md`](unity-soccer/README.md)를 보세요.
+
+## Arcane Drift · Unity 2D 무한 모드 (`arcane-drift/`)
+
+탑다운 액션 게임을 한 단계씩 만드는 중입니다. 진행 상황과 설계는 [`arcane-drift/CLAUDE.md`](arcane-drift/CLAUDE.md)에 있습니다.
