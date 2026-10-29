@@ -112,7 +112,7 @@ kbd {
       </div>
     </div>
   </div>
-  <p class="note">조종하는 선수는 머리 위에 1P·2P 표시가 붙어요. 공에서 가장 가까운 선수로 자동 전환되고, 패스하면 받는 선수로 넘어가요. 슛할 때 위·아래 키를 같이 누르면 골대 위쪽·아래쪽을 노려요. 상대 공 가까이 붙으면 뺏을 수 있어요. 키보드가 있는 컴퓨터에서 플레이하세요.</p>
+  <p class="note">조종하는 선수는 머리 위에 1P·2P 표시가 붙어요. 공에서 가장 가까운 선수로 자동 전환되고, 패스하면 받는 선수로 넘어가요. 패스는 바라보는 방향과 상관없이 동료에게 자동으로 가고, 슛은 골키퍼가 없는 쪽 골대 구석으로 자동 조준돼요. 상대 공 가까이 붙으면 뺏을 수 있어요. 키보드가 있는 컴퓨터에서 플레이하세요.</p>
 </div>
 
 <script>
@@ -192,18 +192,22 @@ kbd {
     const t = p.team, mates = field(t).filter(m => m !== p);
     const mate = mates.sort((a, b) => dist(a, p) - dist(b, p))[0];
     const tx = mate.x + mate.vx * 12, ty = mate.y + mate.vy * 12;
-    const dx = tx - ball.x, dy = ty - ball.y, d = Math.hypot(dx, dy) || 1;
-    const sp = clamp(d * 0.03 + 4.5, 6, 11);
-    release(p, dx / d * sp, dy / d * sp);
+    kick(p, tx, ty, clamp(dist(p, { x: tx, y: ty }) * 0.03 + 4.5, 6, 11));
     teams[t].receiver = mate; teams[t].receiverUntil = now + 1.6; teams[t].active = mate;
   }
+  // Shots aim on their own: at the corner of the goal farther from the opposing keeper
   function shootBall(p) {
-    const t = p.team, keys = KEYS[t];
-    const aim = (down.has(keys.down) ? 1 : 0) - (down.has(keys.up) ? 1 : 0);
+    const t = p.team, keeper = players.find(q => q.team !== t && q.role === 'gk');
     const gx = t ? L - 10 : R + 10;
-    const gy = H / 2 + aim * 52 + (Math.random() - 0.5) * 40;
-    const dx = gx - ball.x, dy = gy - ball.y, d = Math.hypot(dx, dy);
-    release(p, dx / d * 13.5, dy / d * 13.5);
+    const gy = (keeper.y < H / 2 ? GB - 18 : GT + 18) + (Math.random() - 0.5) * 24;
+    kick(p, gx, gy, 13.5);
+  }
+  // Kicks ignore which way the player faces: the ball is moved to the side facing the target first
+  function kick(p, tx, ty, sp) {
+    const dx = tx - p.x, dy = ty - p.y, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d;
+    ball.x = p.x + ux * (p.r + BR + 1); ball.y = p.y + uy * (p.r + BR + 1);
+    p.fx = ux; p.fy = uy;
+    release(p, ux * sp, uy * sp);
   }
   function release(p, vx, vy) {
     ball.owner = null; ball.vx = vx; ball.vy = vy; p.noTouch = now + 0.3;
