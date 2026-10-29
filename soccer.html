@@ -101,6 +101,7 @@ kbd {
         <span class="kgroup"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 이동</span>
         <span class="kgroup"><kbd>E</kbd> 패스</span>
         <span class="kgroup"><kbd>R</kbd> 슛</span>
+        <span class="kgroup"><kbd>Q</kbd> 감아차기</span>
       </div>
     </div>
     <div class="card blue">
@@ -109,10 +110,11 @@ kbd {
         <span class="kgroup"><kbd>I</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd> 이동</span>
         <span class="kgroup"><kbd>O</kbd> 패스</span>
         <span class="kgroup"><kbd>P</kbd> 슛</span>
+        <span class="kgroup"><kbd>U</kbd> 감아차기</span>
       </div>
     </div>
   </div>
-  <p class="note">조종하는 선수는 머리 위에 1P·2P 표시가 붙어요. 공에서 가장 가까운 선수로 자동 전환되고, 패스하면 받는 선수로 넘어가요. 패스는 바라보는 방향과 상관없이 동료에게 자동으로 가고, 슛은 골키퍼가 없는 쪽 골대 구석으로 자동 조준돼요. 상대 공 가까이 붙으면 뺏을 수 있어요. 키보드가 있는 컴퓨터에서 플레이하세요.</p>
+  <p class="note">조종하는 선수는 머리 위에 1P·2P 표시가 붙어요. 공에서 가장 가까운 선수로 자동 전환되고, 패스하면 받는 선수로 넘어가요. 패스는 바라보는 방향과 상관없이 동료에게 자동으로 가고, 슛은 골키퍼가 없는 쪽 골대 구석으로 자동 조준돼요. 감아차기는 조금 느리지만 골대 바깥쪽으로 날아가다가 휘어서 구석에 꽂혀요. 상대 공 가까이 붙으면 뺏을 수 있어요. 키보드가 있는 컴퓨터에서 플레이하세요.</p>
 </div>
 
 <script>
@@ -123,8 +125,8 @@ kbd {
   const PR = 15, BR = 7, MATCH = 180;
   const COLORS = [{ main: '#ff5a4e', gk: '#ffa64e' }, { main: '#4ea8ff', gk: '#7ee0c8' }];
   const KEYS = [
-    { up: 'KeyW', left: 'KeyA', down: 'KeyS', right: 'KeyD', pass: 'KeyE', shoot: 'KeyR' },
-    { up: 'KeyI', left: 'KeyJ', down: 'KeyK', right: 'KeyL', pass: 'KeyO', shoot: 'KeyP' },
+    { up: 'KeyW', left: 'KeyA', down: 'KeyS', right: 'KeyD', pass: 'KeyE', shoot: 'KeyR', curl: 'KeyQ' },
+    { up: 'KeyI', left: 'KeyJ', down: 'KeyK', right: 'KeyL', pass: 'KeyO', shoot: 'KeyP', curl: 'KeyU' },
   ];
   const ALL = new Set(KEYS.flatMap(k => Object.values(k)));
 
@@ -154,7 +156,7 @@ kbd {
     kickoff(0);
   }
   function kickoff(team) {
-    ball = { x: W / 2, y: H / 2, vx: 0, vy: 0, owner: null };
+    ball = { x: W / 2, y: H / 2, vx: 0, vy: 0, spin: 0, owner: null };
     for (const t of [0, 1]) {
       const [gk, f1, f2] = players.filter(p => p.team === t);
       const d = teams[t].dir, side = t ? R : L;
@@ -203,14 +205,47 @@ kbd {
     kick(p, gx, gy, 13.5);
   }
   // Kicks ignore which way the player faces: the ball is moved to the side facing the target first
-  function kick(p, tx, ty, sp) {
+  function kick(p, tx, ty, sp, spin = 0) {
     const dx = tx - p.x, dy = ty - p.y, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d;
     ball.x = p.x + ux * (p.r + BR + 1); ball.y = p.y + uy * (p.r + BR + 1);
     p.fx = ux; p.fy = uy;
-    release(p, ux * sp, uy * sp);
+    release(p, ux * sp, uy * sp, spin);
   }
-  function release(p, vx, vy) {
-    ball.owner = null; ball.vx = vx; ball.vy = vy; p.noTouch = now + 0.3;
+  function release(p, vx, vy, spin = 0) {
+    ball.owner = null; ball.vx = vx; ball.vy = vy; ball.spin = spin; p.noTouch = now + 0.3;
+  }
+  // Curler: launched wide of the far post, then bends back in. The launch angle is found by
+  // simulating the same ball physics and keeping the angle that lands on the corner.
+  function curlShot(p) {
+    const t = p.team, keeper = players.find(q => q.team !== t && q.role === 'gk');
+    const gx = t ? L - 10 : R + 10;
+    const gy = keeper.y < H / 2 ? GB - 14 : GT + 14, side = gy > H / 2 ? 1 : -1;
+    const base = Math.atan2(gy - p.y, gx - p.x), reach = p.r + BR + 1;
+    let best = null;
+    for (const spin of [0.016, -0.016]) for (let a = -0.8; a <= 0.8; a += 0.005) {
+      const ux = Math.cos(base + a), uy = Math.sin(base + a);
+      if (ux * (gx - p.x) <= 0 || (p.y + uy / ux * (gx - p.x) - gy) * side <= 0) continue; // must start out wide
+      const y = landingY({ x: p.x + ux * reach, y: p.y + uy * reach }, ux * 12, uy * 12, spin, gx);
+      if (y !== null && (!best || Math.abs(y - gy) < best.err)) best = { err: Math.abs(y - gy), ux, uy, spin };
+    }
+    if (!best) return shootBall(p);
+    kick(p, p.x + best.ux * 100, p.y + best.uy * 100, 12, best.spin);
+  }
+  function landingY(start, vx, vy, spin, gx) {
+    const o = { x: start.x, y: start.y, vx, vy, spin }, dir = Math.sign(gx - o.x);
+    for (let i = 0; i < 300; i++) {
+      spinStep(o, 1);
+      o.x += o.vx; o.y += o.vy; o.vx *= 0.985; o.vy *= 0.985;
+      if ((gx - o.x) * dir <= 0) return o.y;
+      if (Math.hypot(o.vx, o.vy) < 1) return null;
+    }
+    return null;
+  }
+  function spinStep(o, k) {
+    if (!o.spin) return;
+    const a = o.spin * k, c = Math.cos(a), s = Math.sin(a);
+    [o.vx, o.vy] = [o.vx * c - o.vy * s, o.vx * s + o.vy * c];
+    o.spin *= Math.pow(0.99, k);
   }
 
   function updateHuman(p, t, k) {
@@ -251,12 +286,12 @@ kbd {
     let tx = line + d * 26, ty = clamp(ball.y, GT + 8, GB - 8);
     if (inBox && !ball.owner && Math.hypot(ball.vx, ball.vy) < 6) { tx = ball.x; ty = ball.y; }
     else if (inBox && ball.owner && ball.owner.team !== t) { tx = line + d * 55; }
-    moveToward(p, tx, ty, 2.7, k);
+    moveToward(p, tx, ty, 2.1, k);
     p.x = d > 0 ? clamp(p.x, line - 4, line + 140) : clamp(p.x, line - 140, line + 4);
   }
 
   function gainBall(p) {
-    ball.owner = p; p.gainAt = now; ball.vx = ball.vy = 0;
+    ball.owner = p; p.gainAt = now; ball.vx = ball.vy = 0; ball.spin = 0;
     if (p.role === 'gk') p.holdUntil = now + 0.7;
   }
 
@@ -293,6 +328,7 @@ kbd {
       const ks = KEYS[t], p = teams[t].active;
       if (ball.owner === p) {
         if (pressed.has(ks.shoot)) shootBall(p);
+        else if (pressed.has(ks.curl)) curlShot(p);
         else if (pressed.has(ks.pass)) passBall(p);
       }
     }
@@ -325,10 +361,11 @@ kbd {
   let lastConceded = 0;
   function physicsBall(k, inNet) {
     const f = Math.pow(0.985, k);
+    spinStep(ball, k);
     ball.x += ball.vx * k; ball.y += ball.vy * k; ball.vx *= f; ball.vy *= f;
     const inMouth = ball.y > GT + BR && ball.y < GB - BR;
-    if (ball.y < T + BR && !(ball.x < L || ball.x > R)) { ball.y = T + BR; ball.vy = Math.abs(ball.vy) * 0.8; }
-    if (ball.y > B - BR && !(ball.x < L || ball.x > R)) { ball.y = B - BR; ball.vy = -Math.abs(ball.vy) * 0.8; }
+    if (ball.y < T + BR && !(ball.x < L || ball.x > R)) { ball.y = T + BR; ball.vy = Math.abs(ball.vy) * 0.8; ball.spin = 0; }
+    if (ball.y > B - BR && !(ball.x < L || ball.x > R)) { ball.y = B - BR; ball.vy = -Math.abs(ball.vy) * 0.8; ball.spin = 0; }
     for (const [edge, s, scorer] of [[L, -1, 1], [R, 1, 0]]) {
       const past = s < 0 ? ball.x - BR < edge : ball.x + BR > edge;
       if (!past) continue;
@@ -338,7 +375,7 @@ kbd {
         if (s < 0 ? ball.x < back : ball.x > back) { ball.x = back; ball.vx *= -0.2; }
         if (!inNet && (s < 0 ? ball.x < edge - BR : ball.x > edge + BR)) goal(scorer);
       } else {
-        ball.x = edge - s * BR; ball.vx = -ball.vx * 0.8;
+        ball.x = edge - s * BR; ball.vx = -ball.vx * 0.8; ball.spin = 0;
       }
     }
   }
