@@ -8,7 +8,7 @@ claude.ai 채팅에서 진행한 인수인계 문서를 바탕으로, **무한 �
 ## 작업 방식 (반드시 지킬 것)
 
 - **한 단계씩** 진행한다. 한 STEP의 코드를 작성하면 사용자가 Unity에서 실행해 확인할 때까지 다음 STEP으로 넘어가지 않는다.
-- 코드를 쓴 뒤에는 **에디터에서 해야 할 설정**(오브젝트 생성, 컴포넌트 추가, 인스펙터 연결)을 단계별로 알려준다. 사용자는 Unity 초보다.
+- 사용자는 Unity 초보다. **에디터 설정 없이 파일 하나(`Assets/Scripts/ArcaneDriftGame.cs`)만 넣고 ▶ 로 실행되는 구조**를 유지한다 (설계 결정 11). 새 STEP 마다 이 파일을 교체하는 방법만 알려준다.
 - 사용자는 답변에 **'적대적 검증'**을 원한다: 주장의 근거가 실제로 성립하는지 먼저 확인하고, 가장 강한 반론을 함께 제시하며, 결론이 안 난 쟁점은 그렇다고 밝힌다.
 - **포팅 중에는 수치를 바꾸지 않는다.** 이상해 보여도 원본 그대로 옮기고, 전부 돌아간 뒤에 밸런싱한다. 원본 수치의 기준은 항상 `arcane-drift.html` 이다.
   - 무한 모드 때문에 **새로 생긴 수치**(아래 2-1)와 원본을 확인 못 해 **임시로 정한 수치**는 코드 주석에 그렇다고 적는다.
@@ -63,16 +63,20 @@ claude.ai 채팅에서 진행한 인수인계 문서를 바탕으로, **무한 �
 ## 3. 확정된 설계 결정
 
 1. **단위 변환**: HTML은 픽셀, Unity는 유닛. **Pixels Per Unit = 100, 모든 거리·속도 ÷ 100.** 시간(쿨다운, 공속, 스폰 간격)은 그대로.
-2. **카메라**: Orthographic, Size **4.5** (`CameraFollow` 가 시작할 때 직접 설정)
+2. **카메라**: Orthographic, Size **4.5** (`ArcaneDriftGame` 이 시작할 때 직접 설정)
 3. **물리 미사용**: Rigidbody2D 없이 `transform.position` 직접 이동 (원본과 동일). 충돌 판정은 거리 계산 / OverlapCircle.
 4. **스탯 구조**: 원본의 `player.mods` 객체를 **그대로 C# 클래스(PlayerMods)로 옮긴다.** 증강은 값을 더하기만 한다 (제거 기능 불필요).
    - ※ 채팅 초반에 설계했던 `StatSheet / CharacterStat / StatModifier` 시스템은 **폐기**했다. 과설계였고 관통·폭발·연쇄 같은 효과를 표현할 수 없다.
-5. **증강 데이터**: ScriptableObject + `ModOp` 열거형 + `List<ModEffect>`. 적용은 `AugmentApplier.Apply()` 의 switch 한 곳에서 처리. (기획 담당이 에디터에서 코드 없이 수정 가능하도록)
+5. **증강 데이터**: ~~ScriptableObject~~ + `ModOp` 열거형 + `List<ModEffect>`. 적용은 `AugmentApplier.Apply()` 의 switch 한 곳에서 처리.
+   - ⚠️ 결정 11(단일 파일)과 충돌한다. ScriptableObject 는 클래스 이름과 같은 파일이 따로 있어야 에셋으로 만들 수 있다. **STEP 5에서 결정**: 코드 안의 데이터 표로 둘지(단일 파일 유지), 증강만 별도 파일로 뺄지(기획 담당이 에디터에서 수정 가능).
 6. **스프라이트**: 흰 원 하나를 만들어 `SpriteRenderer.color` 로 색만 바꿔 사용 (원본이 원으로 그림). 에셋 교체는 미션 3에서.
 7. **평타 경직(attackLock)**: 원본처럼 발사 직후 `min(0.22, 0.4/aspd)` 초 동안 이동 불가, **캔슬 불가**로 먼저 구현. 플레이해 본 뒤 캔슬 추가 여부 결정 (추가 시 우클릭 이동 명령에서 attackLock = 0).
 8. **풀링 필수**: 적·투사체·XP 오브. 6분 시점에 초당 약 30마리 스폰.
 9. namespace는 `ArcaneDrift`.
 10. **입력**: 모든 입력은 `GameInput` 을 거친다. 프로젝트 입력 설정(Old / New Input System / Both) 어느 쪽이어도 동작한다.
+11. **단일 파일 + 자동 생성**: 게임 전체가 `ArcaneDriftGame.cs` 한 파일이다. `[RuntimeInitializeOnLoadMethod]` 로 씬이 열리면 게임 오브젝트를 스스로 만들고, 카메라·플레이어·배경·원 스프라이트도 코드로 만든다.
+    - MonoBehaviour 는 `ArcaneDriftGame` 하나뿐이고, 나머지(Player, 적, 투사체 등)는 일반 C# 클래스로 두고 `ArcaneDriftGame.Update` 에서 돌린다. MonoBehaviour 를 여러 개 두면 각각 같은 이름의 파일이 필요해 단일 파일이 깨진다.
+    - 대가: 파일이 길어진다(팀원과 같은 파일을 동시에 고치면 충돌), 인스펙터에서 수치를 바꿀 수 없다(수치는 파일 위쪽 상수로 모은다).
 
 ### 단위 변환표
 
@@ -94,18 +98,14 @@ claude.ai 채팅에서 진행한 인수인계 문서를 바탕으로, **무한 �
 
 ### STEP 1 — 우클릭 이동 + 카메라 : **코드 작성 완료, 사용자 동작 확인 대기**
 
-`Assets/Scripts/` (전부 namespace `ArcaneDrift`)
-- `GameInput.cs` — 우클릭, 마우스 위치 (입력 설정 무관)
-- `PlayerController.cs` — 우클릭 이동, `CursorWorld()`, `IsMoving`, `Facing`, `Radius`, `ClearMoveTarget()`. STEP 3에서 공격 대상 추격이 추가될 예정.
-- `CameraFollow.cs` — LateUpdate에서 target 추적, 시작 시 Orthographic Size 4.5 설정
-- `ClickMarker.cs` — 우클릭 지점 표시 (작아지며 사라짐). 수명 0.35초·크기 0.25는 임시 수치
-- `ScrollingGrid.cs` — 격자 그림을 코드로 만들어 40×40 Tiled 로 깔고, 칸 단위로 스냅해 따라감. 칸 1유닛·선 색은 임시 수치
+`Assets/Scripts/ArcaneDriftGame.cs` 한 파일 (namespace `ArcaneDrift`)
+- `ArcaneDriftGame` (MonoBehaviour) — 자동 생성, 카메라 설정(Size 4.5), 우클릭 처리, LateUpdate에서 카메라·배경 추적
+- `Player` — 우클릭 이동, `Position`, `IsMoving`, `Facing`, `Radius`, `ClearMoveTarget()`. STEP 3에서 공격 대상 추격이 추가될 예정. 색 `#C9B6FF`
+- `ClickMarker` — 우클릭 지점 표시 (작아지며 사라짐). 색 `#6BD5FF`. 수명 0.35초·크기 0.25는 임시 수치
+- `GameInput` — 우클릭, 마우스 위치 (입력 설정 무관)
+- `Art` — 흰 원·격자 스프라이트 생성. 격자는 40×40 Tiled, 칸 단위로 스냅해 따라감. 칸 1유닛·선 색은 임시 수치
 
-씬 구성 (2D Built-In 템플릿 기준)
-- Main Camera: `CameraFollow`(target = Player)
-- Player: SpriteRenderer(Circle, `#C9B6FF`), Scale 0.3, `PlayerController`(cam, clickMarkerPrefab)
-- Grid: 빈 오브젝트 + `ScrollingGrid`(target = Player). SpriteRenderer 는 자동 추가
-- ClickMarker 프리팹: Circle `#6BD5FF` + `ClickMarker`
+씬 구성: 없음. 빈 씬에서 ▶ 를 누르면 된다.
 
 **다음 할 일**: STEP 1 동작 확인 → STEP 2
 
@@ -174,4 +174,6 @@ claude.ai 채팅에서 진행한 인수인계 문서를 바탕으로, **무한 �
 | 최대 체력 증강 후 체력 그대로 | 증가분만큼 현재 체력 더하기 누락 |
 | 처치 폭발 연쇄로 프레임 튐 | 재귀 깊이 제한 플래그 필요 |
 | 스크립트가 Add Component에 안 뜸 | 콘솔 컴파일 에러, 또는 파일명 ≠ 클래스명 (예: `CameraFollow (1).cs`) |
-| 우클릭해도 안 움직임 | Game 창을 클릭하지 않아 포커스가 없음, 또는 Player 의 `cam` 이 비어 있고 카메라에 MainCamera 태그가 없음 |
+| 우클릭해도 안 움직임 | Game 창을 클릭하지 않아 포커스가 없음 |
+| 플레이어가 두 개 / 클래스 중복 컴파일 에러 | 예전 5개 파일 버전(`PlayerController.cs` 등)이 프로젝트에 남아 있음 → 지우고 `ArcaneDriftGame.cs` 만 둔다 |
+| "No script asset for ..." 경고 | 한 파일에 MonoBehaviour 를 두 개 이상 만듦 → 일반 클래스로 바꾼다 (결정 11) |
