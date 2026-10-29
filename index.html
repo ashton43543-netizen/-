@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>몬티홀 쇼</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=Gowun+Dodum&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<style>
+/* Layout: a TV stage — doors in a row up top, the host's line under them, then your scoreboard and a 1,000-game simulator side by side */
+:root {
+  --bg: #eef1f6;
+  --stage: #1d2340;
+  --stage-ink: #f3f0e6;
+  --panel: #ffffff;
+  --fg: #1b2033;
+  --muted: #5d6480;
+  --line: #d5dae6;
+  --door: #d9a12b;
+  --door-edge: #a8771a;
+  --accent: #e0483b;
+  --stay: #5a6fd6;
+  --switch: #e0483b;
+  --win: #1f9d63;
+  --f-display: "Black Han Sans", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --f-body: "Gowun Dodum", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12152a; --stage: #0b0e1e; --stage-ink: #f3f0e6; --panel: #1b2038; --fg: #e9ebf5;
+  --muted: #9aa1c0; --line: #2d3456; --door: #e2ad3b; --door-edge: #9c6d14; --accent: #ff6a5c;
+  --stay: #8396ff; --switch: #ff6a5c; --win: #3fcf8a; color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #12152a; --stage: #0b0e1e; --stage-ink: #f3f0e6; --panel: #1b2038; --fg: #e9ebf5;
+  --muted: #9aa1c0; --line: #2d3456; --door: #e2ad3b; --door-edge: #9c6d14; --accent: #ff6a5c;
+  --stay: #8396ff; --switch: #ff6a5c; --win: #3fcf8a; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 16px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px 48px;
+}
+.wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 20px; }
+h1, h2 { font-family: var(--f-display); font-weight: 400; margin: 0; text-wrap: balance; letter-spacing: .01em; }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
+h1 { font-size: clamp(30px, 6vw, 46px); line-height: 1.05; }
+h1 span { color: var(--accent); }
+.sub { margin: 4px 0 0; color: var(--muted); max-width: 60ch; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 3px; background: var(--panel); }
+.seg button { font: inherit; font-size: 14px; border: 0; background: none; color: var(--muted); padding: 6px 14px; border-radius: 999px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.seg-label { font-size: 12px; color: var(--muted); letter-spacing: .06em; margin-right: 8px; }
+
+/* Stage */
+.stage {
+  background: var(--stage); color: var(--stage-ink); border-radius: 18px; padding: 28px 20px 22px;
+  background-image: radial-gradient(ellipse at 50% -20%, rgba(255,220,140,.22), transparent 60%);
+  display: grid; gap: 22px;
+}
+.doors { display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); gap: clamp(8px, 2vw, 22px); max-width: 720px; width: 100%; margin: 0 auto; }
+.doors.many { gap: 6px; max-width: 900px; }
+.door {
+  position: relative; aspect-ratio: 3 / 5; max-width: 100%; border: 0; padding: 0; background: #0a0c18;
+  border-radius: 8px 8px 2px 2px; cursor: pointer; perspective: 900px; font: inherit; color: inherit;
+  box-shadow: inset 0 0 0 3px rgba(0,0,0,.4);
+}
+.door:disabled { cursor: default; }
+.door:focus-visible { outline: 3px solid var(--door); outline-offset: 4px; }
+.prize { position: absolute; inset: 0; display: grid; place-items: center; font-size: clamp(26px, 7vw, 64px); }
+.many .prize { font-size: clamp(16px, 3.4vw, 34px); }
+.panel-front {
+  position: absolute; inset: 0; transform-origin: left center; transition: transform .7s cubic-bezier(.3,.7,.3,1);
+  background: linear-gradient(180deg, var(--door), var(--door-edge)); border-radius: 8px 8px 2px 2px;
+  display: grid; place-items: center; box-shadow: inset 0 0 0 4px rgba(0,0,0,.12);
+}
+.panel-front::before { content: ""; position: absolute; inset: 12% 14% 50%; border: 3px solid rgba(0,0,0,.14); border-radius: 4px; }
+.panel-front::after { content: ""; position: absolute; inset: 56% 14% 8%; border: 3px solid rgba(0,0,0,.14); border-radius: 4px; }
+.knob { position: absolute; right: 12%; top: 52%; width: 9%; aspect-ratio: 1; border-radius: 50%; background: #3a2a08; }
+.num { font-family: var(--f-display); font-size: clamp(22px, 5vw, 44px); color: #3a2a08; position: relative; z-index: 1; }
+.many .num { font-size: clamp(13px, 2.6vw, 24px); }
+.door.open .panel-front { transform: rotateY(-105deg); }
+.door.picked { box-shadow: 0 0 0 4px var(--stage-ink); }
+.door.final.win { box-shadow: 0 0 0 4px var(--win); }
+.door.final.lose { box-shadow: 0 0 0 4px var(--accent); }
+.tag { position: absolute; left: 50%; bottom: -26px; transform: translateX(-50%); font-size: 12px; white-space: nowrap; color: var(--stage-ink); letter-spacing: .04em; }
+.many .tag { font-size: 10px; }
+.host { text-align: center; min-height: 3.2em; display: grid; gap: 4px; margin-top: 10px; }
+.host p { margin: 0; font-size: clamp(16px, 2.6vw, 20px); text-wrap: balance; }
+.host small { color: rgba(243,240,230,.65); font-size: 13px; }
+.actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; min-height: 46px; }
+.btn {
+  font: inherit; font-size: 16px; border: 0; border-radius: 999px; padding: 10px 22px; cursor: pointer;
+  background: var(--stage-ink); color: var(--stage); font-weight: 700;
+}
+.btn.switch { background: var(--switch); color: #fff; }
+.btn.stay { background: var(--stay); color: #fff; }
+.btn.ghost { background: transparent; color: var(--stage-ink); box-shadow: inset 0 0 0 1.5px rgba(243,240,230,.5); }
+.btn:focus-visible { outline: 3px solid var(--door); outline-offset: 3px; }
+.btn:disabled { opacity: .5; cursor: default; }
+
+/* Lower boards */
+.boards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
+.board { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; display: grid; gap: 14px; align-content: start; min-width: 0; }
+.board h2 { font-size: 22px; }
+.board .hint { margin: -8px 0 0; color: var(--muted); font-size: 14px; }
+.row { display: grid; grid-template-columns: 64px 1fr auto; gap: 10px; align-items: center; }
+.row .lbl { font-size: 14px; font-weight: 700; }
+.row .lbl.stay { color: var(--stay); } .row .lbl.switch { color: var(--switch); }
+.track { position: relative; height: 22px; background: var(--bg); border-radius: 6px; overflow: hidden; }
+.fill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 6px; transition: width .25s ease-out; }
+.fill.stay { background: var(--stay); } .fill.switch { background: var(--switch); }
+.theory { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); opacity: .55; }
+.val { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-size: 14px; text-align: right; min-width: 9ch; }
+.val small { display: block; color: var(--muted); font-size: 11px; }
+.legend { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.legend i { width: 2px; height: 14px; background: var(--fg); opacity: .55; display: inline-block; }
+.sim-ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.sim-ctl .btn { background: var(--fg); color: var(--bg); font-size: 14px; padding: 8px 18px; }
+.sim-ctl .btn.ghost { background: transparent; color: var(--fg); box-shadow: inset 0 0 0 1.5px var(--line); }
+.counter { font-family: var(--f-mono); font-size: 13px; color: var(--muted); }
+.why { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+.why h2 { font-size: 22px; margin-bottom: 8px; }
+.why p { margin: 0 0 10px; max-width: 68ch; }
+.why p:last-child { margin: 0; }
+.why b { color: var(--accent); }
+@media (prefers-reduced-motion: reduce) { .panel-front, .fill { transition: none; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>몬티홀 <span>쇼</span></h1>
+      <p class="sub">문 뒤 어딘가에 자동차가 한 대 있습니다. 나머지는 전부 염소예요. 문을 고르면 사회자가 염소 문을 열어주고, 바꿀지 말지 물어봅니다.</p>
+    </div>
+    <div>
+      <span class="seg-label">문 개수</span>
+      <div class="seg" role="group" aria-label="문 개수">
+        <button type="button" id="n3" aria-pressed="true">3개</button>
+        <button type="button" id="n10" aria-pressed="false">10개</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="stage" aria-label="게임 무대">
+    <div class="doors" id="doors"></div>
+    <div class="host" aria-live="polite"><p id="hostLine"></p><small id="hostSub"></small></div>
+    <div class="actions" id="actions"></div>
+  </section>
+
+  <div class="boards">
+    <section class="board">
+      <h2>내 기록</h2>
+      <p class="hint" id="myHint">직접 플레이한 결과예요. 여러 판 해볼수록 차이가 보입니다.</p>
+      <div class="row"><span class="lbl stay">유지</span><div class="track"><div class="fill stay" id="myStayBar"></div><div class="theory" id="myStayT"></div></div><span class="val" id="myStayVal">–</span></div>
+      <div class="row"><span class="lbl switch">바꾸기</span><div class="track"><div class="fill switch" id="mySwBar"></div><div class="theory" id="mySwT"></div></div><span class="val" id="mySwVal">–</span></div>
+      <div class="legend"><i></i>이론상 승률</div>
+    </section>
+
+    <section class="board">
+      <h2>자동 시뮬레이션</h2>
+      <p class="hint">컴퓨터가 두 전략으로 각각 수천 판을 돌립니다.</p>
+      <div class="row"><span class="lbl stay">유지</span><div class="track"><div class="fill stay" id="simStayBar"></div><div class="theory" id="simStayT"></div></div><span class="val" id="simStayVal">–</span></div>
+      <div class="row"><span class="lbl switch">바꾸기</span><div class="track"><div class="fill switch" id="simSwBar"></div><div class="theory" id="simSwT"></div></div><span class="val" id="simSwVal">–</span></div>
+      <div class="sim-ctl">
+        <button type="button" class="btn" id="sim1k">1,000판 돌리기</button>
+        <button type="button" class="btn" id="sim10k">10,000판</button>
+        <button type="button" class="btn ghost" id="simReset">초기화</button>
+        <span class="counter" id="simCount">0판</span>
+      </div>
+    </section>
+  </div>
+
+  <section class="why">
+    <h2>왜 바꾸는 게 유리할까?</h2>
+    <p id="why1"></p>
+    <p id="why2"></p>
+    <p>핵심은 사회자가 <b>자동차 위치를 알고</b> 일부러 염소 문만 연다는 점이에요. 사회자의 행동은 무작위가 아니라 정보가 담겨 있습니다.</p>
+  </section>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const doorsEl = $('doors'), actionsEl = $('actions');
+  let n = 3, car, pick, keep, opened, phase, finalPick;
+  const stats = { 3: { stay: [0, 0], switch: [0, 0] }, 10: { stay: [0, 0], switch: [0, 0] } };
+  const sim = { 3: { stay: [0, 0], switch: [0, 0] }, 10: { stay: [0, 0], switch: [0, 0] } };
+  const rand = k => Math.floor(Math.random() * k);
+
+  function newGame() {
+    car = rand(n); pick = null; keep = null; finalPick = null; opened = new Set(); phase = 'pick';
+    doorsEl.style.setProperty('--n', n);
+    doorsEl.classList.toggle('many', n > 3);
+    doorsEl.innerHTML = '';
+    for (let i = 0; i < n; i++) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'door'; b.id = 'door' + i;
+      b.setAttribute('aria-label', (i + 1) + '번 문');
+      b.innerHTML = `<span class="prize">${i === car ? '🚗' : '🐐'}</span><span class="panel-front"><span class="num">${i + 1}</span><span class="knob"></span></span><span class="tag"></span>`;
+      b.addEventListener('click', () => choose(i));
+      doorsEl.appendChild(b);
+    }
+    say('문을 하나 고르세요.', `${n}개 중 하나에 자동차가 있어요. 처음에 맞힐 확률은 ${pct(1 / n)}.`);
+    actionsEl.innerHTML = '';
+  }
+
+  function choose(i) {
+    if (phase !== 'pick') return;
+    pick = i; phase = 'decide';
+    const others = [...Array(n).keys()].filter(d => d !== pick);
+    keep = pick === car ? others[rand(others.length)] : car;
+    others.forEach(d => { if (d !== keep) opened.add(d); });
+    render();
+    const openedList = [...opened].map(d => d + 1).join(', ');
+    say(`${pick + 1}번을 고르셨군요. 제가 ${openedList}번 문을 열어볼게요. 전부 염소!`,
+        `이제 ${pick + 1}번을 유지할까요, ${keep + 1}번으로 바꿀까요?`);
+    actionsEl.innerHTML = '';
+    actionsEl.append(
+      mkBtn(`${pick + 1}번 유지`, 'stay', () => decide(false)),
+      mkBtn(`${keep + 1}번으로 바꾸기`, 'switch', () => decide(true))
+    );
+    actionsEl.querySelector('.switch').focus({ preventScroll: true });
+  }
+
+  function decide(sw) {
+    if (phase !== 'decide') return;
+    phase = 'done';
+    finalPick = sw ? keep : pick;
+    const win = finalPick === car;
+    const s = stats[n][sw ? 'switch' : 'stay'];
+    s[1]++; if (win) s[0]++;
+    for (let d = 0; d < n; d++) opened.add(d);
+    render();
+    const strat = sw ? '바꿨고' : '유지했고';
+    say(win ? `🎉 자동차 당첨! ${finalPick + 1}번에 차가 있었어요.` : `염소네요. 자동차는 ${car + 1}번에 있었습니다.`,
+        `이번 판은 ${strat}, ${(sw === (pick !== car)) ? '이 전략이 맞았어요' : '반대 전략이 정답이었어요'}. 처음 고른 문이 자동차였던 확률은 ${pct(1 / n)}뿐이었어요.`);
+    actionsEl.innerHTML = '';
+    const again = mkBtn('한 판 더', '', newGame);
+    actionsEl.append(again);
+    again.focus({ preventScroll: true });
+    drawMine();
+  }
+
+  function render() {
+    for (let d = 0; d < n; d++) {
+      const el = $('door' + d);
+      el.classList.toggle('open', opened.has(d));
+      el.classList.toggle('picked', d === pick && phase !== 'done');
+      el.classList.toggle('final', phase === 'done' && d === finalPick);
+      el.classList.toggle('win', phase === 'done' && d === finalPick && d === car);
+      el.classList.toggle('lose', phase === 'done' && d === finalPick && d !== car);
+      el.disabled = phase !== 'pick';
+      el.querySelector('.tag').textContent =
+        phase === 'done' ? (d === finalPick ? '최종 선택' : (d === pick ? '처음 선택' : '')) :
+        (d === pick ? '내 선택' : (phase === 'decide' && d === keep ? '남은 문' : ''));
+    }
+  }
+
+  function mkBtn(text, cls, fn) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn ' + cls; b.textContent = text; b.addEventListener('click', fn);
+    return b;
+  }
+  function say(a, b) { $('hostLine').textContent = a; $('hostSub').textContent = b; }
+  function pct(x) { return (x * 100).toFixed(x * 100 % 1 ? 1 : 0) + '%'; }
+
+  function bar(prefix, data) {
+    [['stay', 'Stay'], ['switch', 'Sw']].forEach(([k, id]) => {
+      const [w, t] = data[k];
+      $(prefix + id + 'Bar').style.width = t ? (w / t * 100) + '%' : '0';
+      $(prefix + id + 'Val').innerHTML = t ? `${(w / t * 100).toFixed(1)}%<small>${w.toLocaleString()} / ${t.toLocaleString()}</small>` : '–<small>0판</small>';
+    });
+    $(prefix + 'StayT').style.left = `calc(${100 / n}% - 1px)`;
+    $(prefix + 'SwT').style.left = `calc(${100 * (n - 1) / n}% - 1px)`;
+  }
+  const drawMine = () => bar('my', stats[n]);
+  const drawSim = () => { bar('sim', sim[n]); $('simCount').textContent = (sim[n].stay[1] + sim[n].switch[1]).toLocaleString() + '판'; };
+
+  let running = false;
+  function runSim(total) {
+    if (running) return;
+    running = true; toggleSim(true);
+    let done = 0;
+    const step = Math.max(10, Math.round(total / 60));
+    (function tick() {
+      const k = Math.min(step, total - done);
+      for (let i = 0; i < k; i++) {
+        const c = rand(n), p = rand(n);
+        const stayWin = p === c;
+        sim[n].stay[1]++; if (stayWin) sim[n].stay[0]++;
+        sim[n].switch[1]++; if (!stayWin) sim[n].switch[0]++;
+      }
+      done += k; drawSim();
+      if (done < total) requestAnimationFrame(tick); else { running = false; toggleSim(false); }
+    })();
+  }
+  function toggleSim(b) { ['sim1k', 'sim10k', 'simReset'].forEach(id => $(id).disabled = b); }
+  $('sim1k').onclick = () => runSim(1000);
+  $('sim10k').onclick = () => runSim(10000);
+  $('simReset').onclick = () => { sim[n] = { stay: [0, 0], switch: [0, 0] }; drawSim(); };
+
+  function explain() {
+    $('why1').textContent = `처음 문을 고를 때 자동차를 맞힐 확률은 ${pct(1 / n)}이고, 자동차가 "내가 고르지 않은 ${n - 1}개 문" 쪽에 있을 확률은 ${pct((n - 1) / n)}입니다.`;
+    $('why2').textContent = `사회자가 그 ${n - 1}개 중 염소 문 ${n - 2}개를 치워주면, ${pct((n - 1) / n)}의 확률이 남은 문 하나에 고스란히 몰립니다. 그래서 바꾸면 ${pct((n - 1) / n)}, 유지하면 그대로 ${pct(1 / n)}이에요.${n === 3 ? ' 직관이 안 오면 10개 모드로 해보세요.' : ''}`;
+  }
+
+  function setN(k) {
+    n = k;
+    $('n3').setAttribute('aria-pressed', k === 3); $('n10').setAttribute('aria-pressed', k === 10);
+    newGame(); drawMine(); drawSim(); explain();
+  }
+  $('n3').onclick = () => setN(3);
+  $('n10').onclick = () => setN(10);
+  setN(3);
+})();
+</script>
+</body>
+</html>
