@@ -42,8 +42,10 @@ namespace ArcaneDrift
         Transform grid;
 
         // ---- 플레이어 ----
-        Transform playerTf, playerDot, targetRing;
+        Transform playerTf, playerBody, targetRing;
         SpriteRenderer playerSr;
+        bool walking;
+        float walkTime;
         Vector2 ppos, facing = Vector2.right;
         Vector2? moveTarget;
         bool holdMove;
@@ -80,7 +82,14 @@ namespace ArcaneDrift
         float Attack { get { return (Tune.PlayerDamage + mods.damageAdd) * (1 + mods.damagePct); } }
         float Aspd { get { return Tune.PlayerAspd * (1 + mods.aspdPct) + (eBuff > 0 ? Tune.EBuffAspd : 0); } }
         float Range { get { return Tune.PlayerRange + mods.rangeAdd; } }
-        float MoveSpeed { get { return Tune.PlayerSpeed * (1 + mods.movePct); } }
+        float MoveSpeed
+        {
+            get
+            {
+                float baseSpeed = Tune.PlayerSpeedMatchesMonsters ? EnemyKind.Grunt.speed * Tune.SpeedScale(elapsed) : Tune.PlayerSpeed;
+                return baseSpeed * (1 + mods.movePct);
+            }
+        }
         float CritChance { get { return Tune.CritChance + mods.critChance; } }
         float CritMult { get { return Tune.CritMult + mods.critMult; } }
         bool AllSkillsLearned { get { return skills[0].level > 0 && skills[1].level > 0 && skills[2].level > 0; } }
@@ -97,9 +106,14 @@ namespace ArcaneDrift
             cam = SetupCamera();
             grid = Art.CreateGrid(transform, 1f, 40f, Palette.Ground, Palette.GridLine);
 
-            playerTf = Art.CreateCircle("Player", transform, Palette.Player, Tune.PlayerRadius * 2, 8);
-            playerSr = playerTf.GetComponent<SpriteRenderer>();
-            playerDot = Art.CreateCircle("Facing", playerTf, Palette.Ground, 0.32f, 9);
+            // 플레이어: 그림자 + 도트 캐릭터. 맞는 판정은 그림과 상관없이 반지름 PlayerRadius 원이다
+            playerTf = new GameObject("Player").transform;
+            playerTf.SetParent(transform, false);
+            var shadow = Art.CreateCircle("Shadow", playerTf, new Color(0f, 0f, 0f, 0.35f), 1f, 7);
+            shadow.localScale = new Vector3(0.38f, 0.13f, 1f);
+            shadow.localPosition = new Vector3(0f, -Art.HeroFeet, 0f);
+            playerSr = Art.CreateSprite("Body", playerTf, Art.HeroIdle, Color.white, 8);
+            playerBody = playerSr.transform;
             targetRing = Art.CreateSprite("TargetRing", transform, Art.Ring, Palette.Target, 11).transform;
 
             enemies = new Pool<Enemy>(transform, "Enemy", 5);
@@ -143,6 +157,7 @@ namespace ArcaneDrift
 
             ppos = Vector2.zero; facing = Vector2.right;
             moveTarget = null; holdMove = false; attackTarget = null;
+            walking = false; walkTime = 0f;
             hp = MaxHp;
             attackCd = attackLock = hurtFlash = eBuff = 0;
             attackCount = 0;
@@ -241,25 +256,27 @@ namespace ArcaneDrift
         {
             Vector2 cursor = CursorWorld();
 
+            // 우클릭: 이동. 누르고 있으면 커서를 계속 따라간다
             if (GameInput.RightClickDown())
             {
-                Enemy e = EnemyAt(cursor);
-                if (e != null)
-                {
-                    // 적 위 우클릭: 그 적을 추격하며 자동 공격 (새 명령 전까지 유지)
-                    attackTarget = e; attackSerial = e.serial;
-                    moveTarget = null; holdMove = false;
-                }
-                else
-                {
-                    // 빈 땅 우클릭: 이동. 누르고 있으면 커서를 계속 따라간다
-                    attackTarget = null;
-                    moveTarget = cursor; holdMove = true;
-                    SpawnFx(cursor, Art.Circle, Palette.Marker, 0.25f, 0f, 0.35f, 12);
-                }
+                attackTarget = null;
+                moveTarget = cursor; holdMove = true;
+                SpawnFx(cursor, Art.Circle, Palette.Marker, 0.25f, 0f, 0.35f, 12);
             }
             else if (holdMove && GameInput.RightClickHeld()) moveTarget = cursor;
             if (!GameInput.RightClickHeld()) holdMove = false;
+
+            // 좌클릭: 그 적을 추격하며 자동 공격 (새 명령 전까지 유지). 적을 정확히 안 찍어도 커서 근처 적을 고른다
+            if (GameInput.LeftClickDown())
+            {
+                Enemy e = EnemyAt(cursor) ?? Nearest(cursor, Tune.ClickAssist, null);
+                if (e != null)
+                {
+                    attackTarget = e; attackSerial = e.serial;
+                    moveTarget = null; holdMove = false;
+                    SpawnFx(e.pos, Art.Ring, Palette.Target, e.radius * 2f + 0.5f, e.radius * 2f + 0.16f, 0.2f, 12);
+                }
+            }
 
             if (GameInput.KeyDown(KeyCode.Q)) CastQ(cursor);
             if (GameInput.KeyDown(KeyCode.W)) CastW();
@@ -300,8 +317,11 @@ namespace ArcaneDrift
             else if (moveTarget.HasValue) dest = moveTarget.Value;
 
             // 평타 경직: 발사 직후 잠깐 이동 불가 (캔슬 불가)
+            walking = false;
             if (dest.HasValue && attackLock <= 0)
             {
+                walking = true;
+                walkTime += dt;
                 Vector2 to = dest.Value - ppos;
                 float d = to.magnitude, step = MoveSpeed * dt;
                 if (d <= step)
@@ -333,6 +353,7 @@ namespace ArcaneDrift
             attackCount++;
 
             float dmg = Attack;
+            SpawnFx(GunTip(), Art.Circle, Palette.Muzzle, 0.16f, 0.04f, 0.08f, 12);
             SpawnBolt(target, dmg, 0f);
             if (mods.multishot > 0)
             {
@@ -364,8 +385,13 @@ namespace ArcaneDrift
         void SyncPlayerVisual()
         {
             playerTf.position = new Vector3(ppos.x, ppos.y, 0f);
-            playerDot.localPosition = new Vector3(facing.x, facing.y, 0f) * 0.28f;
-            playerSr.color = hurtFlash > 0 ? Palette.Hurt : eBuff > 0 ? Color.Lerp(Palette.Player, Palette.Marker, 0.5f) : Palette.Player;
+            // 오른쪽을 보고 그린 그림이라 왼쪽을 볼 때 좌우 반전. 거의 위·아래로 움직일 때는 방향을 유지
+            if (Mathf.Abs(facing.x) > 0.05f) playerSr.flipX = facing.x < 0;
+            // 걸을 때: 두 프레임 다리 교차 + 살짝 통통 튀기
+            bool step = walking && Mathf.FloorToInt(walkTime * 8f) % 2 == 1;
+            playerSr.sprite = step ? Art.HeroStep : Art.HeroIdle;
+            playerBody.localPosition = new Vector3(0f, walking ? Mathf.Abs(Mathf.Sin(walkTime * 16f)) * 0.03f : 0f, 0f);
+            playerSr.color = hurtFlash > 0 ? Palette.Hurt : eBuff > 0 ? Palette.Haste : Color.white;
 
             Enemy t = Valid(attackTarget, attackSerial);
             targetRing.gameObject.SetActive(t != null && state == State.Playing);
@@ -790,10 +816,17 @@ namespace ArcaneDrift
             return p;
         }
 
+        // 총구 위치 (캐릭터 그림 기준)
+        Vector2 GunTip()
+        {
+            return ppos + new Vector2(playerSr.flipX ? -Art.HeroGunX : Art.HeroGunX, Art.HeroGunY);
+        }
+
         void SpawnBolt(Enemy target, float dmg, float delay)
         {
-            Vector2 dir = DirOr(target.pos - ppos, facing);
-            var p = NewProjectile(ProjKind.Basic, ppos, dir * Tune.BoltSpeed, Tune.BoltRadius, dmg, Tune.BoltLife, Palette.Bolt, 1.8f);
+            Vector2 from = GunTip();
+            Vector2 dir = DirOr(target.pos - from, facing);
+            var p = NewProjectile(ProjKind.Basic, from, dir * Tune.BoltSpeed, Tune.BoltRadius, dmg, Tune.BoltLife, Palette.Bolt, 1.8f);
             p.target = target; p.targetSerial = target.serial;
             p.pierceLeft = mods.pierce;
             p.bouncesLeft = mods.ricochet;
@@ -812,7 +845,7 @@ namespace ArcaneDrift
                 if (p.delay > 0)
                 {
                     p.delay -= dt;
-                    p.pos = ppos;
+                    p.pos = GunTip();
                     p.sr.enabled = p.delay <= 0;
                     p.tf.position = new Vector3(p.pos.x, p.pos.y, 0f);
                     continue;
@@ -1209,7 +1242,7 @@ namespace ArcaneDrift
 
             // 처음 몇 초 동안 조작 안내
             if (elapsed < 12f)
-                Text(new Rect(0, 572, vw, 24), "우클릭: 이동   ·   적을 우클릭: 공격   ·   Q W E: 스킬 (레벨업 카드로 배움)   ·   Esc: 일시정지", 15, Palette.Muted, TextAnchor.MiddleCenter);
+                Text(new Rect(0, 572, vw, 24), "우클릭: 이동   ·   좌클릭: 공격할 적 지정   ·   Q W E: 스킬 (레벨업 카드로 배움)   ·   Esc: 일시정지", 15, Palette.Muted, TextAnchor.MiddleCenter);
 
             DrawSkills();
 
@@ -1256,7 +1289,7 @@ namespace ArcaneDrift
             if (Button(new Rect(vw / 2f - 120, 340, 240, 56), "시작하기", Palette.ButtonPrimary)) StartRun();
             Text(new Rect(0, 402, vw, 22), "Enter 또는 Space 로도 시작", 14, Palette.Muted, TextAnchor.MiddleCenter);
             Text(new Rect(vw / 2f - 300, 460, 600, 120),
-                "우클릭: 이동   ·   적을 우클릭: 추격하며 자동 공격\nQ W E: 스킬 (레벨업 카드로 배우고 강화)\n1~4: 카드 선택   ·   Esc: 일시정지",
+                "우클릭: 이동   ·   적을 좌클릭: 추격하며 자동 공격\nQ W E: 스킬 (레벨업 카드로 배우고 강화)\n1~4: 카드 선택   ·   Esc: 일시정지",
                 16, Palette.Body, TextAnchor.UpperCenter, false, true);
         }
 
@@ -1319,7 +1352,10 @@ namespace ArcaneDrift
         public const float CameraSize = 4.5f;
 
         public const float PlayerRadius = 0.15f;
-        public const float PlayerSpeed = 2.5f;
+        public const float PlayerSpeed = 2.5f;   // 원본 이속. 아래 PlayerSpeedMatchesMonsters 가 true 면 쓰지 않는다
+        // 사용자 요청: 플레이어 이속 = 기본 몬스터(grunt) 이속. 몬스터 이속이 시간에 따라 오르면 같이 오른다.
+        // false 로 바꾸면 원본 2.5 로 돌아간다
+        public const bool PlayerSpeedMatchesMonsters = true;
         public const float PlayerHp = 100f;
         public const float PlayerDamage = 10f;
         public const float PlayerAspd = 1.1f;
@@ -1384,6 +1420,7 @@ namespace ArcaneDrift
 
         // ---- 원본을 확인하지 못해 정한 수치 [임시] ----
         public const float ContactCooldown = 0.7f;
+        public const float ClickAssist = 0.6f;   // 좌클릭이 적을 살짝 빗나가도 이 거리 안의 가장 가까운 적을 고른다
         public const float BoltRadius = 0.06f, BoltLife = 2f;
         public const float QRange = 6.5f, QRadius = 0.14f, QExplodeRadius = 0.9f, QExplodeRatio = 0.8f;
         public const float WKnockback = 4f;
@@ -1413,6 +1450,8 @@ namespace ArcaneDrift
         public static readonly Color GridLine = Hex(0x2A243D);
         public static readonly Color Player = Hex(0xC9B6FF);
         public static readonly Color Marker = Hex(0x6BD5FF);
+        public static readonly Color Muzzle = Hex(0xE4C8FF);
+        public static readonly Color Haste = Hex(0xB8EEFF);
         public static readonly Color Target = Hex(0xFF6B6B);
         public static readonly Color Bolt = Hex(0xE4D8FF);
         public static readonly Color QBolt = Hex(0x6BD5FF);
@@ -1802,6 +1841,15 @@ namespace ArcaneDrift
 #endif
         }
 
+        public static bool LeftClickDown()
+        {
+#if USE_NEW_INPUT
+            return Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame;
+#else
+            return Input.GetMouseButtonDown(0);
+#endif
+        }
+
         public static bool RightClickHeld()
         {
 #if USE_NEW_INPUT
@@ -1853,6 +1901,8 @@ namespace ArcaneDrift
     {
         public static Sprite Circle { get; private set; }
         public static Sprite Ring { get; private set; }
+        public static Sprite HeroIdle { get; private set; }
+        public static Sprite HeroStep { get; private set; }
         static Material spriteMaterial;   // URP 프로젝트일 때만 쓰는 조명 없는 재질 (2D 조명 없이도 보이게)
 
         public static void Init()
@@ -1861,6 +1911,94 @@ namespace ArcaneDrift
             spriteMaterial = unlit != null ? new Material(unlit) : null;
             Circle = MakeDisc(128, 0f);
             Ring = MakeDisc(128, 0.86f);
+            HeroIdle = MakePixelSprite(Concat(HeroTop, HeroLegsIdle));
+            HeroStep = MakePixelSprite(Concat(HeroTop, HeroLegsStep));
+        }
+
+        // ---- 플레이어 캐릭터: 16×20 도트, 오른쪽을 보고 있다 (탕탕특공대 느낌의 2등신, 직접 그린 그림) ----
+        const int HeroW = 16, HeroH = 20;
+        const float HeroPixelsPerUnit = 32f;          // 화면에서 0.5 × 0.625 유닛 (맞는 판정 원보다 크게 보이도록)
+        const float HeroPivotY = 0.3f;                // 그림 아래에서 30% 지점이 플레이어 위치
+        public const float HeroFeet = HeroH * HeroPivotY / HeroPixelsPerUnit;
+        public const float HeroGunX = 7.5f / HeroPixelsPerUnit;   // 총구: 가운데에서 오른쪽 7.5픽셀
+        public const float HeroGunY = -0.5f / HeroPixelsPerUnit;
+
+        static readonly string[] HeroTop =
+        {
+            "................",
+            ".....KKKKKK.....",
+            "...KKHHHHHHKK...",
+            "..KHHHHHHHHHHK..",
+            ".KHHHHHHHHHHHHK.",
+            "KRRRRRRRRRRRRRK.",
+            "RRKHSSSSSSSSHK..",
+            "KRKSSSSWESWESK..",
+            ".KKSSSSWESWESK..",
+            "..KSSppSSSSpSK..",
+            "...KSSSSSSSSK...",
+            "....KKKKKKKK....",
+            "...KBBBBBBBK....",
+            "..KBBYBBBBSKKKK.",
+            "..KbBYBBBSGGGCCK",
+            "..KbBBBBBKKgKKK.",
+            "...KTTTTTK......",
+        };
+        static readonly string[] HeroLegsIdle =
+        {
+            "...KPPKPPK......",
+            "...KOOKOOK......",
+            "....KK.KK.......",
+        };
+        static readonly string[] HeroLegsStep =
+        {
+            "..KPPK.KPPK.....",
+            "..KOOK.KOOK.....",
+            "...KK...KK......",
+        };
+
+        static Color32 HeroColor(char c)
+        {
+            switch (c)
+            {
+                case 'K': return new Color32(27, 21, 48, 255);    // 외곽선
+                case 'H': return new Color32(92, 58, 38, 255);    // 머리카락
+                case 'R': return new Color32(229, 72, 77, 255);   // 머리띠
+                case 'S': return new Color32(255, 214, 176, 255); // 피부
+                case 'p': return new Color32(255, 160, 150, 255); // 볼
+                case 'W': return new Color32(255, 255, 255, 255); // 눈 흰자
+                case 'E': return new Color32(27, 21, 48, 255);    // 눈동자
+                case 'B': return new Color32(62, 123, 214, 255);  // 옷
+                case 'b': return new Color32(44, 90, 168, 255);   // 옷 그림자
+                case 'Y': return new Color32(255, 201, 74, 255);  // 옷 장식
+                case 'T': return new Color32(255, 201, 74, 255);  // 허리띠
+                case 'G': return new Color32(110, 114, 132, 255); // 총
+                case 'g': return new Color32(70, 72, 88, 255);    // 손잡이
+                case 'C': return new Color32(190, 140, 255, 255); // 마력 총구
+                case 'P': return new Color32(52, 46, 74, 255);    // 바지
+                case 'O': return new Color32(120, 78, 48, 255);   // 신발
+                default: return new Color32(0, 0, 0, 0);
+            }
+        }
+
+        static string[] Concat(string[] a, string[] b)
+        {
+            var all = new string[a.Length + b.Length];
+            a.CopyTo(all, 0);
+            b.CopyTo(all, a.Length);
+            return all;
+        }
+
+        // 글자 그림(위쪽 줄이 먼저)을 스프라이트로. 도트가 번지지 않게 Point 필터
+        static Sprite MakePixelSprite(string[] rows)
+        {
+            var tex = new Texture2D(HeroW, HeroH, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Clamp };
+            var pixels = new Color32[HeroW * HeroH];
+            for (int row = 0; row < HeroH; row++)
+                for (int x = 0; x < HeroW; x++)
+                    pixels[(HeroH - 1 - row) * HeroW + x] = HeroColor(rows[row][x]);   // 텍스처는 아래 줄부터
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, HeroW, HeroH), new Vector2(0.5f, HeroPivotY), HeroPixelsPerUnit);
         }
 
         public static SpriteRenderer CreateSprite(string name, Transform parent, Sprite sprite, Color color, int order)
