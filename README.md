@@ -27,4 +27,4 @@
 
 ## Arcane Drift · Unity 2D 무한 모드 (`arcane-drift/`)
 
-탑다운 액션 게임을 한 단계씩 만드는 중입니다. 진행 상황과 설계는 [`arcane-drift/CLAUDE.md`](arcane-drift/CLAUDE.md)에 있습니다.
+LoL식 우클릭 조작 탑다운 액션, 무한 모드. 실행 방법은 [`arcane-drift/README.md`](arcane-drift/README.md), 설계와 진행 상황은 [`arcane-drift/CLAUDE.md`](arcane-drift/CLAUDE.md)에 있습니다.
