@@ -45,7 +45,7 @@ namespace ArcaneDrift
         Transform playerTf, playerBody, targetRing;
         SpriteRenderer playerSr;
         bool walking;
-        float walkTime;
+        float walkTime, shake;
         Vector2 ppos, facing = Vector2.right;
         Vector2? moveTarget;
         bool holdMove;
@@ -159,7 +159,7 @@ namespace ArcaneDrift
 
             ppos = Vector2.zero; facing = Vector2.right;
             moveTarget = null; holdMove = false; attackTarget = null;
-            walking = false; walkTime = 0f;
+            walking = false; walkTime = 0f; shake = 0f;
             hp = MaxHp;
             attackCd = attackLock = hurtFlash = eBuff = 0;
             attackCount = 0;
@@ -231,7 +231,14 @@ namespace ArcaneDrift
         // 카메라와 배경은 플레이어가 움직인 뒤(LateUpdate)에 따라가야 떨리지 않는다
         void LateUpdate()
         {
-            cam.transform.position = new Vector3(ppos.x, ppos.y, -10f);
+            // 화면 흔들림: 게임 중에만 (일시정지·카드 선택 중에는 멈춘 화면이 떨리지 않게)
+            Vector2 offset = Vector2.zero;
+            if (state == State.Playing && shake > 0f)
+            {
+                offset = Random.insideUnitCircle * (shake * Tune.ShakeStrength);
+                shake = Mathf.Max(0f, shake - Time.deltaTime * 3f);
+            }
+            cam.transform.position = new Vector3(ppos.x + offset.x, ppos.y + offset.y, -10f);
             // 바닥 무늬 한 장(FloorUnits) 단위로만 옮겨서, 무늬가 바닥에 고정된 것처럼 보이게 한다
             float period = Art.FloorUnits;
             grid.position = new Vector3(Mathf.Round(ppos.x / period) * period, Mathf.Round(ppos.y / period) * period, 0f);
@@ -416,7 +423,7 @@ namespace ArcaneDrift
             var s = skills[index];
             float evolve = s.evolved ? Tune.EvolveDamage[index] : 1f;
             float synergy = mods.synergyFinale ? Tune.SynergyDamage : 1f;
-            return Attack * coef * evolve * (1 + mods.skillDmgPct) * synergy;
+            return Attack * coef * Tune.SkillDamageBoost * evolve * (1 + mods.skillDmgPct) * synergy;
         }
 
         void StartCooldown(int index)
@@ -444,6 +451,7 @@ namespace ArcaneDrift
                 Tune.QRange / Tune.QSpeed, s.evolved ? Palette.Legendary : Palette.QBolt, 1.5f);
             p.evolved = s.evolved;
             facing = dir;
+            Shake(0.15f);
             StartCooldown(0);
         }
 
@@ -454,6 +462,7 @@ namespace ArcaneDrift
             if (s.level == 0 || s.cdLeft > 0) return;
             float radius = Tune.WRadius(s.level) + (s.evolved ? Tune.WEvolveRadius : 0f);
             float dmg = SkillDamage(1, Tune.WDamage(s.level));
+            SpawnFx(ppos, Art.Circle, Palette.Fade(Palette.Void, 0.35f), radius * 1.2f, radius * 2f, 0.25f, 4);
             SpawnFx(ppos, Art.Ring, Palette.Void, 0.3f, radius * 2, 0.35f, 10);
 
             var list = enemies.Active;
@@ -466,8 +475,9 @@ namespace ArcaneDrift
                 if (s.evolved) e.stun = Mathf.Max(e.stun, Tune.WEvolveStun * resist);
                 bool crit;
                 float hit = RollCrit(dmg, out crit);
-                DealDamage(e, hit, crit, 0);
+                DealDamage(e, hit, crit, 0, true);
             }
+            Shake(0.6f);
             StartCooldown(1);
         }
 
@@ -494,7 +504,7 @@ namespace ArcaneDrift
                     dashSet.Add(e);
                     bool crit;
                     float hit = RollCrit(dmg, out crit);
-                    DealDamage(e, hit, crit, 0);
+                    DealDamage(e, hit, crit, 0, true);
                 }
                 SpawnFx(at, Art.Circle, Palette.Dash, Tune.PlayerRadius * 2, 0.05f, 0.3f, 7);
             }
@@ -505,6 +515,7 @@ namespace ArcaneDrift
             moveTarget = null;
             attackLock = 0;
             eBuff = Tune.EBuffTime;
+            Shake(0.4f);
             StartCooldown(2);
             if (s.evolved && dashKilled) s.cdLeft *= 1f - Tune.EEvolveRefund;
         }
@@ -694,12 +705,13 @@ namespace ArcaneDrift
             }
         }
 
-        void DealDamage(Enemy e, float dmg, bool crit, int depth)
+        void DealDamage(Enemy e, float dmg, bool crit, int depth, bool skill = false)
         {
             if (!e.alive) return;
             e.hp -= dmg;
             e.flash = 0.08f;
-            AddText(e.pos + new Vector2(0, e.radius + 0.1f), Mathf.RoundToInt(dmg).ToString(), crit ? Palette.Crit : Palette.DamageText, crit);
+            Color textColor = crit ? Palette.Crit : skill ? Palette.SkillHit : Palette.DamageText;
+            AddText(e.pos + new Vector2(0, e.radius + 0.1f), Mathf.RoundToInt(dmg).ToString(), textColor, crit || skill);
             if (e.hp <= 0) Kill(e, depth);
         }
 
@@ -715,6 +727,7 @@ namespace ArcaneDrift
             {
                 SpawnFx(e.pos, Art.Ring, e.color, e.radius * 2f, e.radius * 8f, 0.6f, 10);
                 Announce(e.rank == Rank.BigBoss ? "대형 보스 처치!" : "보스 처치!");
+                Shake(1f);
             }
             if (mods.killExplode > 0 && depth == 0)
                 Explosion(e.pos, Tune.KillExplodeRadius, e.maxHp * mods.killExplode, 1, Palette.Explosion, null);
@@ -872,7 +885,10 @@ namespace ArcaneDrift
                 if (p.life <= 0)
                 {
                     if (p.kind == ProjKind.QBolt && p.evolved)
+                    {
                         Explosion(p.pos, Tune.QExplodeRadius, p.damage * Tune.QExplodeRatio, 1, Palette.Legendary, null);
+                        Shake(0.5f);
+                    }
                     p.alive = false;
                     continue;
                 }
@@ -904,7 +920,7 @@ namespace ArcaneDrift
                     p.hit.Add(e);
                     bool crit;
                     float hit = RollCrit(p.damage, out crit);
-                    DealDamage(e, hit, crit, 0);
+                    DealDamage(e, hit, crit, 0, true);
                 }
             }
         }
@@ -1143,6 +1159,11 @@ namespace ArcaneDrift
         {
             if (texts.Count >= Tune.MaxTexts) texts.RemoveAt(0);
             texts.Add(new FloatText { pos = at + Random.insideUnitCircle * 0.06f, text = text, color = color, big = big });
+        }
+
+        void Shake(float amount)
+        {
+            shake = Mathf.Min(1.2f, Mathf.Max(shake, amount));
         }
 
         void Announce(string text)
@@ -1434,6 +1455,9 @@ namespace ArcaneDrift
         }
         public const int MaxSkillLevel = 5;
         public static readonly float[] EvolveDamage = { 1.6f, 1.5f, 1.5f };
+        // 사용자 요청: 스킬 피해를 시원하게. Q·W·E 피해 계수(위 QDamage·WDamage·EDamage)에 모두 곱한다 (원본 1)
+        public const float SkillDamageBoost = 3f;
+        public const float ShakeStrength = 0.12f;   // 스킬 쓸 때 화면 흔들림 세기 (0 이면 안 흔들림)
         public const float WEvolveRadius = 0.7f, WEvolveStun = 0.6f;
         public const int EDashSteps = 14;
         public const float EBuffAspd = 0.6f, EBuffTime = 2f, EEvolveRefund = 0.7f;
@@ -1479,6 +1503,7 @@ namespace ArcaneDrift
         public static readonly Color Muzzle = Hex(0xE4C8FF);
         public static readonly Color Haste = Hex(0xB8EEFF);
         public static readonly Color Stunned = Hex(0xB9A2FF);
+        public static readonly Color SkillHit = Hex(0x8FE9FF);
         public static readonly Color Target = Hex(0xFF6B6B);
         public static readonly Color Bolt = Hex(0xE4D8FF);
         public static readonly Color QBolt = Hex(0x6BD5FF);
@@ -1852,7 +1877,7 @@ namespace ArcaneDrift
 
         static float Coef(int i, int lv)
         {
-            return i == 0 ? Tune.QDamage(lv) : i == 1 ? Tune.WDamage(lv) : Tune.EDamage(lv);
+            return (i == 0 ? Tune.QDamage(lv) : i == 1 ? Tune.WDamage(lv) : Tune.EDamage(lv)) * Tune.SkillDamageBoost;
         }
     }
 
