@@ -80,9 +80,22 @@ namespace ArcaneDrift
         readonly HashSet<Enemy> chainSet = new HashSet<Enemy>();
         readonly HashSet<Enemy> dashSet = new HashSet<Enemy>();
 
+        // ---- 패시브 스킬 ----
+        readonly PassiveState[] passives = new PassiveState[Passive.Count];
+        readonly List<SpriteRenderer> shurikenSprites = new List<SpriteRenderer>();
+        readonly List<SpriteRenderer> laserSprites = new List<SpriteRenderer>();
+        Pool<Zone> zones;
+        Pool<Falling> meteors;
+        readonly List<Delayed> delayed = new List<Delayed>();
+        readonly List<Enemy> picks = new List<Enemy>();
+        float invulnUntil;
+        int stepCount;
+
         // ---- 계산된 능력치 ----
         float MaxHp { get { return Tune.PlayerHp + mods.maxHpAdd; } }
-        float Attack { get { return (Tune.PlayerDamage + mods.damageAdd) * (1 + mods.damagePct); } }
+        // 레벨이 오를수록 모든 피해가 커진다 (몬스터 체력이 시간에 따라 계속 늘어나서)
+        float LevelBonus { get { return 1f + (level - 1) * Tune.DamagePerLevel; } }
+        float Attack { get { return (Tune.PlayerDamage + mods.damageAdd) * (1 + mods.damagePct) * LevelBonus; } }
         float Aspd { get { return Tune.PlayerAspd * (1 + mods.aspdPct) + (eBuff > 0 ? Tune.EBuffAspd : 0); } }
         float Range { get { return Tune.PlayerRange + mods.rangeAdd; } }
         float MoveSpeed
@@ -125,6 +138,8 @@ namespace ArcaneDrift
             projectiles = new Pool<Projectile>(transform, "Projectile", 9);
             orbs = new Pool<XpOrb>(transform, "XpOrb", 2);
             fxs = new Pool<Fx>(transform, "Fx", 10);
+            zones = new Pool<Zone>(transform, "Zone", -4);
+            meteors = new Pool<Falling>(transform, "Meteor", 12);
 
             bestTime = PlayerPrefs.GetFloat(BestTimeKey, 0f);
             bestKills = PlayerPrefs.GetInt(BestKillsKey, 0);
@@ -156,6 +171,11 @@ namespace ArcaneDrift
         void ResetRun()
         {
             enemies.Clear(); projectiles.Clear(); orbs.Clear(); fxs.Clear(); texts.Clear();
+            zones.Clear(); meteors.Clear(); delayed.Clear();
+            for (int i = 0; i < Passive.Count; i++) passives[i] = new PassiveState();
+            foreach (var sr in shurikenSprites) sr.gameObject.SetActive(false);
+            foreach (var sr in laserSprites) sr.gameObject.SetActive(false);
+            invulnUntil = 0f;
             mods = new PlayerMods();
             skills = new[] { new SkillState(0), new SkillState(1), new SkillState(2) };
             stacks.Clear(); cards.Clear(); pickedOrder.Clear();
@@ -262,16 +282,18 @@ namespace ArcaneDrift
         {
             elapsed += dt;
             bannerTime -= dt;
+            stepCount++;
 
             HandleCommands();
             UpdatePlayer(dt);
             UpdateSpawning(dt);
             UpdateEnemies(dt);
             UpdateProjectiles(dt);
+            UpdatePassives(dt);
             UpdateOrbs(dt);
             UpdateFx(dt);
 
-            enemies.Sweep(); projectiles.Sweep(); orbs.Sweep(); fxs.Sweep();
+            enemies.Sweep(); projectiles.Sweep(); orbs.Sweep(); fxs.Sweep(); zones.Sweep(); meteors.Sweep();
             SyncPlayerVisual();
 
             if (hp <= 0) { GameOver(); return; }
@@ -393,6 +415,7 @@ namespace ArcaneDrift
 
         void DamagePlayer(float amount)
         {
+            if (elapsed < invulnUntil) return;   // 무적 돌진
             float dmg = Mathf.Max(1f, amount - mods.armor);
             hp -= dmg;
             hurtFlash = 0.12f;
@@ -420,6 +443,7 @@ namespace ArcaneDrift
             playerSr.sprite = step ? Art.HeroStep : Art.HeroIdle;
             playerBody.localPosition = new Vector3(0f, walking ? Mathf.Abs(Mathf.Sin(walkTime * 16f)) * 0.03f : 0f, 0f);
             playerSr.color = hurtFlash > 0 ? Palette.Hurt : eBuff > 0 ? Palette.Haste : Color.white;
+            if (elapsed < invulnUntil) playerSr.color = Palette.Fade(Palette.Haste, Mathf.FloorToInt(elapsed * 20f) % 2 == 0 ? 0.45f : 0.9f);
 
             Enemy t = Valid(attackTarget, attackSerial);
             targetRing.gameObject.SetActive(t != null && state == State.Playing);
@@ -435,9 +459,7 @@ namespace ArcaneDrift
         float SkillDamage(int index, float coef)
         {
             var s = skills[index];
-            float evolve = s.evolved ? Tune.EvolveDamage[index] : 1f;
-            float synergy = mods.synergyFinale ? Tune.SynergyDamage : 1f;
-            return Attack * coef * Tune.SkillDamageBoost * evolve * (1 + mods.skillDmgPct) * synergy;
+            return SkillPower * coef * (s.evolved ? Tune.EvolveDamage[index] : 1f);
         }
 
         void StartCooldown(int index)
@@ -455,29 +477,58 @@ namespace ArcaneDrift
             return v.sqrMagnitude > 1e-6f ? v.normalized : fallback;
         }
 
-        // Q 아케인 볼트: 커서 방향으로 적을 관통하는 마력탄
+        // Q 아케인 볼트: 커서 방향으로 적을 관통하는 마력탄 (삼연발·거대화·잔류 증강)
         void CastQ(Vector2 cursor)
         {
             var s = skills[0];
             if (s.level == 0 || s.cdLeft > 0) return;
             Vector2 dir = DirOr(cursor - ppos, facing);
-            var p = NewProjectile(ProjKind.QBolt, ppos, dir * Tune.QSpeed, Tune.QRadius, SkillDamage(0, Tune.QDamage(s.level)),
-                Tune.QRange / Tune.QSpeed, s.evolved ? Palette.Legendary : Palette.QBolt, 1.5f);
-            p.evolved = s.evolved;
+            float dmg = SkillDamage(0, Tune.QDamage(s.level)) * (mods.qGiant ? Tune.QGiantDamage : 1f);
+            float radius = Tune.QRadius * (1 + mods.skillArea) * (mods.qGiant ? Tune.QGiantSize : 1f);
+            int bolts = 1 + (mods.qTriple ? 2 : 0) + mods.skillAmount;
+            Color c = s.evolved ? Palette.Legendary : Palette.QBolt;
+            for (int b = 0; b < bolts; b++)
+            {
+                Vector2 d = Rotate(dir, (b - (bolts - 1) / 2f) * Tune.QSpreadDeg * Mathf.Deg2Rad);
+                var p = NewProjectile(ProjKind.QBolt, ppos, d * Tune.QSpeed, radius, dmg, Tune.QRange / Tune.QSpeed, c, 1.5f);
+                p.evolved = s.evolved;
+            }
+            Glow(ppos + dir * 0.3f, c, 1f, 0.2f);
+            Sparks(ppos + dir * 0.3f, c, 8, 3f, 0.1f, 0.25f);
             facing = dir;
-            Shake(0.15f);
+            Shake(0.2f);
             StartCooldown(0);
         }
 
-        // W 공허의 파동: 자기 중심 원형 피해 + 넉백 (진화하면 기절)
+        // W 공허의 파동: 자기 중심 원형 피해 + 넉백 (진화하면 기절, 이중 파동·중력 붕괴 증강)
         void CastW()
         {
             var s = skills[1];
             if (s.level == 0 || s.cdLeft > 0) return;
-            float radius = Tune.WRadius(s.level) + (s.evolved ? Tune.WEvolveRadius : 0f);
-            float dmg = SkillDamage(1, Tune.WDamage(s.level));
-            SpawnFx(ppos, Art.Circle, Palette.Fade(Palette.Void, 0.35f), radius * 1.2f, radius * 2f, 0.25f, 4);
-            SpawnFx(ppos, Art.Ring, Palette.Void, 0.3f, radius * 2, 0.35f, 10);
+            VoidWave(1f);
+            if (mods.wDouble) After(Tune.WDoubleDelay, () => VoidWave(Tune.WDoubleRatio));
+            StartCooldown(1);
+        }
+
+        void VoidWave(float power)
+        {
+            var s = skills[1];
+            float radius = (Tune.WRadius(s.level) + (s.evolved ? Tune.WEvolveRadius : 0f)) * (1 + mods.skillArea) * (1 + mods.wRadiusPct);
+            float dmg = SkillDamage(1, Tune.WDamage(s.level)) * power * (mods.wPull ? Tune.WPullDamage : 1f);
+            Color c = Palette.Void;
+            Glow(ppos, c, radius * 2.4f, 0.3f);
+            SpawnFx(ppos, Art.Circle, Palette.Fade(c, 0.35f), radius * 1.2f, radius * 2f, 0.25f, 4);
+            SpawnFx(ppos, Art.Ring, c, 0.3f, radius * 2f, 0.35f, 10);
+            SpawnFx(ppos, Art.Ring, Color.white, 0.3f, radius * 1.6f, 0.22f, 10);
+            for (int k = 0; k < 20; k++)
+            {
+                var f = SpawnFx(ppos, Art.Glow, c, 0.3f, 0.05f, 0.4f, 12);
+                if (f == null) break;
+                Vector2 d = Rotate(Vector2.right, k * Mathf.PI / 10f);
+                f.vel = (mods.wPull ? -d : d) * radius * 3f;
+                if (mods.wPull) f.pos = ppos + d * radius;
+                f.drag = 3f;
+            }
 
             var list = enemies.Active;
             for (int i = 0; i < list.Count; i++)
@@ -485,26 +536,29 @@ namespace ArcaneDrift
                 var e = list[i];
                 if (!e.alive || !InReach(e, ppos, radius)) continue;
                 float resist = e.IsBoss ? Tune.BossResist : 1f;
-                e.knock += DirOr(e.pos - ppos, facing) * Tune.WKnockback * resist;
+                Vector2 away = DirOr(e.pos - ppos, facing);
+                e.knock += (mods.wPull ? -away * 0.8f : away) * Tune.WKnockback * resist;   // 중력 붕괴: 밀지 않고 끌어당긴다
                 if (s.evolved) e.stun = Mathf.Max(e.stun, Tune.WEvolveStun * resist);
                 bool crit;
                 float hit = RollCrit(dmg, out crit);
-                DealDamage(e, hit, crit, 0, true);
+                DealDamage(e, hit, crit, 0, HitKind.Skill);
             }
-            Shake(0.6f);
-            StartCooldown(1);
+            Shake(0.6f * power);
         }
 
         // E 섬광 돌진: 커서 방향 대시를 14단계로 나눠 이동하며 경로의 적을 타격 (순간이동하면 적을 통과만 한다)
         void CastE(Vector2 cursor)
         {
             var s = skills[2];
-            if (s.level == 0 || s.cdLeft > 0) return;
+            if (s.level == 0) return;
+            if (s.cdLeft <= 0 && s.stock <= 0) s.stock = 1 + mods.eCharges;   // 연속 돌진: 쿨다운이 끝나면 충전이 가득 찬다
+            if (s.stock <= 0) return;
             Vector2 dir = DirOr(cursor - ppos, facing);
-            float dist = Tune.EDistance(s.level);
+            float dist = Tune.EDistance(s.level) * (1 + mods.skillArea * 0.5f);
             float dmg = SkillDamage(2, Tune.EDamage(s.level));
             Vector2 start = ppos;
 
+            Glow(start, Palette.Marker, 1f, 0.2f);
             dashSet.Clear();
             dashing = true; dashKilled = false;
             for (int step = 1; step <= Tune.EDashSteps; step++)
@@ -518,9 +572,11 @@ namespace ArcaneDrift
                     dashSet.Add(e);
                     bool crit;
                     float hit = RollCrit(dmg, out crit);
-                    DealDamage(e, hit, crit, 0, true);
+                    DealDamage(e, hit, crit, 0, HitKind.Skill);
+                    Sparks(e.pos, Palette.Marker, 3, 2.5f, 0.08f, 0.2f);
                 }
-                SpawnFx(at, Art.Circle, Palette.Dash, Tune.PlayerRadius * 2, 0.05f, 0.3f, 7);
+                SpawnFx(at, Art.Glow, Palette.Dash, 0.5f, 0.1f, 0.3f, 7);
+                if (step % 3 == 0) Ghost(at, 0.25f + 0.04f * step);
             }
             dashing = false;
 
@@ -529,9 +585,609 @@ namespace ArcaneDrift
             moveTarget = null;
             attackLock = 0;
             eBuff = Tune.EBuffTime;
+            Glow(ppos, Palette.Marker, 1.2f, 0.25f);
+            Sparks(ppos, Palette.Marker, 8, 3f, 0.1f, 0.25f);
             Shake(0.4f);
-            StartCooldown(2);
-            if (s.evolved && dashKilled) s.cdLeft *= 1f - Tune.EEvolveRefund;
+
+            if (mods.eAfterBlast)
+            {
+                // 잔상 폭발: 지나간 길이 잠시 뒤 터진다
+                float blastDmg = dmg * Tune.EAfterRatio, blastR = Tune.EAfterRadius * (1 + mods.skillArea);
+                After(Tune.EAfterDelay, () =>
+                {
+                    for (int k = 0; k < 5; k++) Blast(start + dir * (dist * (k + 0.5f) / 5f), blastR, blastDmg, Palette.Marker, 0f);
+                    Shake(0.3f);
+                });
+            }
+            if (mods.eGuard) invulnUntil = elapsed + Tune.EGuardTime;
+
+            s.stock--;
+            if (s.stock <= 0)
+            {
+                StartCooldown(2);
+                if (s.evolved && dashKilled) s.cdLeft *= 1f - Tune.EEvolveRefund;
+            }
+        }
+
+        // ================================================================ 패시브 스킬 (자동 발동)
+        // 레벨업 카드로 얻는다. 쿨다운마다 알아서 터지고, Lv 5 다음에 진화 카드가 나온다.
+
+        float SkillPower
+        {
+            get
+            {
+                float synergy = mods.synergyFinale ? Tune.SynergyDamage : 1f;
+                float resonance = mods.resonance && OwnedPassives >= 3 ? Tune.ResonanceDamage : 1f;
+                return Attack * Tune.SkillDamageBoost * (1 + mods.skillDmgPct) * synergy * resonance;
+            }
+        }
+
+        float PassiveDamage(int id, float coef)
+        {
+            return SkillPower * coef * (passives[id].evolved ? Tune.PassiveEvolveDamage : 1f);
+        }
+
+        // 스킬 범위 배율 (광역화 증강 + 그 패시브 전용 크기 증강)
+        float Area(int id)
+        {
+            return (1 + mods.skillArea) * (id >= 0 ? 1 + mods.passiveSize[id] : 1f);
+        }
+
+        float Duration { get { return 1 + mods.skillDuration; } }
+
+        int OwnedPassives
+        {
+            get
+            {
+                int n = 0;
+                for (int i = 0; i < Passive.Count; i++) if (passives[i] != null && passives[i].level > 0) n++;
+                return n;
+            }
+        }
+
+        void UpdatePassives(float dt)
+        {
+            UpdateShurikens(dt);
+            UpdateLasers(dt);
+            for (int id = 0; id < Passive.Count; id++)
+            {
+                var s = passives[id];
+                if (s.level == 0 || id == Passive.Shuriken) continue;
+                if (id == Passive.Laser && s.active > 0) continue;   // 레이저는 켜져 있는 동안 쿨다운이 돌지 않는다
+                s.timer -= dt;
+                if (s.timer > 0) continue;
+                s.timer = Passive.Cooldown(id, s.level, mods.SkillCdMult);
+                switch (id)
+                {
+                    case Passive.Thunder: FireThunder(s); break;
+                    case Passive.Acid: FireAcid(s); break;
+                    case Passive.Missile: FireMissiles(s); break;
+                    case Passive.Frost: FireFrost(s, 1f); break;
+                    case Passive.Laser: s.active = Tune.LaserTime * Duration; break;
+                    case Passive.Vortex: FireVortex(s); break;
+                    case Passive.Meteor: FireMeteors(s); break;
+                }
+            }
+            UpdateZones(dt);
+            UpdateMeteors(dt);
+            UpdateDelayed(dt);
+        }
+
+        // 사거리 안의 적 중 무작위로 n명을 picks 에 고른다 (겹치지 않게)
+        void PickTargets(float range, int n)
+        {
+            picks.Clear();
+            FindNearby(ppos, range, null);
+            for (int i = 0; i < n && nearby.Count > 0; i++)
+            {
+                int k = Random.Range(0, nearby.Count);
+                picks.Add(nearby[k]);
+                nearby[k] = nearby[nearby.Count - 1];
+                nearby.RemoveAt(nearby.Count - 1);
+            }
+        }
+
+        void EnsureSprites(List<SpriteRenderer> list, int count, Sprite sprite, int order, string name)
+        {
+            while (list.Count < count) list.Add(Art.CreateSprite(name, transform, sprite, Color.white, order));
+            for (int i = 0; i < list.Count; i++)
+            {
+                bool on = i < count;
+                if (list[i].gameObject.activeSelf != on) list[i].gameObject.SetActive(on);
+            }
+        }
+
+        // ---- 회전 표창: 몸 주위를 도는 표창이 닿는 적을 벤다 ----
+        void UpdateShurikens(float dt)
+        {
+            var s = passives[Passive.Shuriken];
+            int count = s.level == 0 ? 0 : 2 + s.level / 2 + mods.passiveExtra[Passive.Shuriken] + mods.skillAmount + (s.evolved ? Tune.ShurikenEvolveExtra : 0);
+            EnsureSprites(shurikenSprites, count, Art.Shuriken, 10, "Shuriken");
+            if (count == 0) return;
+
+            s.angle += Tune.ShurikenSpin * (mods.shurikenFast ? Tune.ShurikenFastMult : 1f) * dt;
+            float orbit = (Tune.ShurikenOrbit + Tune.ShurikenOrbitPerLv * s.level) * Area(Passive.Shuriken);
+            if (s.evolved) orbit *= 1f + 0.35f * Mathf.Sin(elapsed * 2.2f);   // 칼날 폭풍: 궤도가 숨 쉬듯 커졌다 작아진다
+            float dmg = PassiveDamage(Passive.Shuriken, Passive.Coef(Passive.Shuriken, s.level)) * (mods.shurikenFast ? Tune.ShurikenFastDamage : 1f);
+            float hitRadius = Tune.ShurikenHitRadius * (1 + mods.skillArea);
+            Color c = Passive.Colors[Passive.Shuriken];
+            var list = enemies.Active;
+            for (int i = 0; i < count; i++)
+            {
+                float a = s.angle + i * Mathf.PI * 2f / count;
+                Vector2 pos = ppos + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * orbit;
+                var t = shurikenSprites[i].transform;
+                t.position = new Vector3(pos.x, pos.y, 0f);
+                t.rotation = Quaternion.Euler(0f, 0f, -elapsed * 900f);
+                t.localScale = Vector3.one * (s.evolved ? 1.35f : 1f);
+                if ((stepCount + i) % 3 == 0) SpawnFx(pos, Art.Glow, Palette.Fade(c, 0.45f), 0.4f, 0.05f, 0.2f, 9);
+
+                for (int k = 0; k < list.Count; k++)
+                {
+                    var e = list[k];
+                    if (!e.alive || elapsed < e.shurikenReady || !InReach(e, pos, hitRadius)) continue;
+                    e.shurikenReady = elapsed + Tune.ShurikenHitEvery;
+                    e.knock += DirOr(e.pos - ppos, Vector2.right) * (e.IsBoss ? 0.2f : 1.2f);
+                    bool crit;
+                    float hit = RollCrit(dmg, out crit);
+                    DealDamage(e, hit, crit, 0, HitKind.Passive);
+                    Sparks(pos, c, 2, 2f, 0.07f, 0.15f);
+                }
+            }
+        }
+
+        // ---- 낙뢰: 무작위 적에게 번개 ----
+        void FireThunder(PassiveState s)
+        {
+            int n = 2 + s.level + mods.passiveExtra[Passive.Thunder] + mods.skillAmount;
+            PickTargets(Tune.ThunderRange, n);
+            if (picks.Count == 0) { s.timer = 0.3f; return; }   // 적이 없으면 곧 다시 확인
+            float radius = Tune.ThunderRadius * Area(Passive.Thunder);
+            float dmg = PassiveDamage(Passive.Thunder, Passive.Coef(Passive.Thunder, s.level));
+            Color c = Passive.Colors[Passive.Thunder];
+            for (int i = 0; i < picks.Count; i++)
+            {
+                Enemy target = picks[i];
+                Vector2 at = target.pos;
+                Lightning(at + new Vector2(Random.Range(-0.7f, 0.7f), 4.6f), at, c, 0.08f);
+                Blast(at, radius, dmg, c, mods.thunderStun ? Tune.ThunderStun : 0f);
+                if (s.evolved) ChainLightning(target, dmg * 0.5f, 3, c);
+            }
+            Shake(0.25f);
+        }
+
+        // ---- 산성 웅덩이: 적이 모인 곳에 웅덩이 ----
+        void FireAcid(PassiveState s)
+        {
+            int n = 1 + s.level / 2 + mods.passiveExtra[Passive.Acid] + mods.skillAmount;
+            float radius = (Tune.AcidRadius + Tune.AcidRadiusPerLv * s.level) * Area(Passive.Acid) * (s.evolved ? 1.5f : 1f);
+            float dmg = PassiveDamage(Passive.Acid, Passive.Coef(Passive.Acid, s.level)) * (mods.acidCorrode ? Tune.AcidCorrodeDamage : 1f);
+            float slow = mods.acidCorrode ? Tune.AcidCorrodeSlow : s.evolved ? Tune.AcidEvolveSlow : 1f;
+            PickTargets(Tune.AcidRange, n);
+            for (int i = 0; i < n; i++)
+            {
+                Vector2 at = i < picks.Count ? picks[i].pos : ppos + Random.insideUnitCircle * 2.5f;
+                SpawnZone(ZoneKind.Acid, at, radius, Tune.AcidTime * Duration, Tune.AcidTick, dmg, slow);
+                Sparks(at, Passive.Colors[Passive.Acid], 5, 2.2f, 0.1f, 0.3f);
+            }
+        }
+
+        // ---- 유도 미사일: 적을 쫓아가 터진다 ----
+        void FireMissiles(PassiveState s)
+        {
+            int n = 1 + s.level / 2 + mods.passiveExtra[Passive.Missile] + mods.skillAmount + (s.evolved ? 2 : 0);
+            PickTargets(Tune.MissileRange, n);
+            if (picks.Count == 0) { s.timer = 0.3f; return; }
+            float dmg = PassiveDamage(Passive.Missile, Passive.Coef(Passive.Missile, s.level));
+            for (int i = 0; i < n; i++)
+            {
+                Enemy target = picks[i % picks.Count];
+                // 위쪽으로 부채꼴로 튀어나갔다가 방향을 꺾어 적을 쫓는다
+                float spread = (i - (n - 1) / 2f) * 0.45f + Random.Range(-0.15f, 0.15f);
+                Vector2 dir = Rotate(Vector2.up, spread);
+                var p = NewProjectile(ProjKind.Missile, ppos, dir * Tune.MissileSpeed * 0.5f, Tune.MissileRadius, dmg, Tune.MissileLife, Color.white, 1f);
+                p.sr.sprite = Art.Missile;
+                p.tf.localScale = Vector3.one * (s.evolved ? 1.3f : 1f);
+                p.target = target; p.targetSerial = target.serial;
+                p.evolved = s.evolved;
+            }
+            Glow(ppos, Passive.Colors[Passive.Missile], 0.9f, 0.15f);
+        }
+
+        void MissileBoom(Projectile p)
+        {
+            float radius = Tune.MissileBlast * Area(Passive.Missile) * (p.evolved ? 1.4f : 1f);
+            float dmg = p.damage;
+            Vector2 at = p.pos;
+            Color c = Passive.Colors[Passive.Missile];
+            Blast(at, radius, dmg, c, 0f);
+            Shake(0.12f);
+            if (mods.missileCluster)
+            {
+                // 집속탄: 작은 폭발 4개가 사방으로 퍼진다
+                for (int k = 0; k < 4; k++)
+                {
+                    Vector2 off = Rotate(Vector2.right, k * Mathf.PI / 2f + Random.Range(-0.3f, 0.3f)) * radius * 0.9f;
+                    After(0.1f + k * 0.04f, () => Blast(at + off, radius * 0.6f, dmg * 0.4f, c, 0f));
+                }
+            }
+            p.alive = false;
+        }
+
+        // ---- 냉기 폭발: 주변에 냉기를 터뜨려 느리게 (얼리기) ----
+        void FireFrost(PassiveState s, float power)
+        {
+            float radius = (Tune.FrostRadius + Tune.FrostRadiusPerLv * s.level) * Area(Passive.Frost);
+            float dmg = PassiveDamage(Passive.Frost, Passive.Coef(Passive.Frost, s.level)) * power;
+            bool freeze = mods.frostFreeze || s.evolved;
+            float freezeTime = s.evolved ? 1.2f : 1f;
+            Color c = Passive.Colors[Passive.Frost];
+            Glow(ppos, c, radius * 2.4f, 0.3f);
+            SpawnFx(ppos, Art.Circle, Palette.Fade(c, 0.3f), radius * 0.4f, radius * 2f, 0.3f, 4);
+            SpawnFx(ppos, Art.Ring, c, radius * 0.3f, radius * 2f, 0.35f, 10);
+            for (int k = 0; k < 16; k++)
+            {
+                var f = SpawnFx(ppos, Art.Star, Color.white, 0.25f, 0.1f, 0.45f, 12);
+                if (f == null) break;
+                f.vel = Rotate(Vector2.right, k * Mathf.PI / 8f) * radius * 2.4f;
+                f.drag = 3f;
+                f.spin = 360f;
+            }
+            var list = enemies.Active;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var e = list[i];
+                if (!e.alive || !InReach(e, ppos, radius)) continue;
+                float resist = e.IsBoss ? Tune.BossResist : 1f;
+                Slow(e, Tune.FrostSlow, Tune.FrostSlowTime * Duration);
+                if (freeze)
+                {
+                    e.stun = Mathf.Max(e.stun, freezeTime * resist);
+                    e.iceUntil = elapsed + freezeTime * resist;
+                }
+                bool crit;
+                float hit = RollCrit(dmg, out crit);
+                DealDamage(e, hit, crit, 0, HitKind.Passive);
+            }
+            Shake(0.3f * power);
+            if (s.evolved && power >= 1f) After(0.35f, () => FireFrost(s, 0.6f));   // 절대 빙결: 한 번 더
+        }
+
+        // ---- 회전 레이저: 잠시 켜져서 몸 주위를 돈다 ----
+        void UpdateLasers(float dt)
+        {
+            var s = passives[Passive.Laser];
+            int beams = 0;
+            if (s.level > 0 && s.active > 0)
+            {
+                s.active -= dt;
+                beams = (1 + (s.level >= 3 ? 1 : 0) + mods.passiveExtra[Passive.Laser] + mods.skillAmount) * (s.evolved ? 2 : 1);
+                if (s.active <= 0) { s.timer = Passive.Cooldown(Passive.Laser, s.level, mods.SkillCdMult); beams = 0; }
+            }
+            EnsureSprites(laserSprites, beams * 2, Art.Pixel, 9, "Laser");   // 광선마다 바깥 빛 + 흰 심
+            if (beams == 0) return;
+
+            s.angle += Tune.LaserSpin * dt;
+            float length = (Tune.LaserLength + Tune.LaserLengthPerLv * s.level) * Area(Passive.Laser);
+            float width = Tune.LaserWidth * (mods.laserPower ? 2f : 1f) * (1 + mods.skillArea);
+            float dmg = PassiveDamage(Passive.Laser, Passive.Coef(Passive.Laser, s.level)) * (mods.laserPower ? Tune.LaserPowerDamage : 1f);
+            Color c = Passive.Colors[Passive.Laser];
+            float pulse = 0.8f + 0.2f * Mathf.Sin(elapsed * 40f);
+            var list = enemies.Active;
+            for (int b = 0; b < beams; b++)
+            {
+                float a = s.angle + b * Mathf.PI * 2f / beams;
+                Vector2 dir = new Vector2(Mathf.Cos(a), Mathf.Sin(a));
+                Vector2 end = ppos + dir * length;
+                Vector2 mid = (ppos + end) * 0.5f;
+                for (int layer = 0; layer < 2; layer++)
+                {
+                    var sr = laserSprites[b * 2 + layer];
+                    sr.sortingOrder = 9 + layer;
+                    sr.transform.position = new Vector3(mid.x, mid.y, 0f);
+                    sr.transform.rotation = Quaternion.Euler(0f, 0f, a * Mathf.Rad2Deg);
+                    sr.transform.localScale = new Vector3(length, layer == 0 ? width * 2.4f * pulse : width * 0.6f, 1f);
+                    sr.color = layer == 0 ? Palette.Fade(c, 0.55f) : Color.white;
+                }
+                if (stepCount % 2 == 0) SpawnFx(end, Art.Glow, c, 0.6f, 0.2f, 0.12f, 11);
+
+                for (int k = 0; k < list.Count; k++)
+                {
+                    var e = list[k];
+                    if (!e.alive || elapsed < e.laserReady) continue;
+                    if (DistToSegment(e.pos, ppos, end) > width * 0.5f + e.radius) continue;
+                    e.laserReady = elapsed + Tune.LaserHitEvery;
+                    bool crit;
+                    float hit = RollCrit(dmg, out crit);
+                    DealDamage(e, hit, crit, 0, HitKind.Passive);
+                    Sparks(e.pos, c, 2, 1.8f, 0.07f, 0.15f);
+                }
+            }
+            if (stepCount % 3 == 0) Glow(ppos, c, 0.8f, 0.12f);
+        }
+
+        // ---- 블랙홀: 적 무리 한가운데에서 끌어당기며 피해 ----
+        void FireVortex(PassiveState s)
+        {
+            PickTargets(Tune.VortexRange, 1);
+            if (picks.Count == 0) { s.timer = 0.3f; return; }
+            float radius = (Tune.VortexRadius + Tune.VortexRadiusPerLv * s.level) * Area(Passive.Vortex) * (s.evolved ? 1.5f : 1f);
+            float dmg = PassiveDamage(Passive.Vortex, Passive.Coef(Passive.Vortex, s.level));
+            var z = SpawnZone(ZoneKind.Vortex, picks[0].pos, radius, Tune.VortexTime * Duration, Tune.VortexTick, dmg, 1f);
+            z.pull = Tune.VortexPull * (1 + mods.passiveSize[Passive.Vortex]);
+            if (mods.vortexCollapse || s.evolved) z.collapse = dmg * Tune.VortexCollapseRatio;
+            Glow(z.pos, Passive.Colors[Passive.Vortex], radius * 2f, 0.3f);
+        }
+
+        // ---- 메테오: 운석이 떨어져 넓게 터진다 ----
+        void FireMeteors(PassiveState s)
+        {
+            int n = 1 + s.level / 2 + mods.passiveExtra[Passive.Meteor] + mods.skillAmount + (s.evolved ? 1 : 0);
+            float radius = (Tune.MeteorRadius + Tune.MeteorRadiusPerLv * s.level) * Area(Passive.Meteor) * (s.evolved ? 1.3f : 1f);
+            float dmg = PassiveDamage(Passive.Meteor, Passive.Coef(Passive.Meteor, s.level));
+            PickTargets(Tune.MeteorRange, n);
+            for (int i = 0; i < n; i++)
+            {
+                Vector2 at = i < picks.Count ? picks[i].pos : ppos + Random.insideUnitCircle * 3f;
+                var m = meteors.Get();
+                m.to = at;
+                m.from = at + new Vector2(-2.4f, 5f);
+                m.t = 0f;
+                m.duration = Tune.MeteorFall + i * 0.12f;
+                m.damage = dmg; m.radius = radius;
+                m.burn = mods.meteorBurn || s.evolved;
+                m.sr.sprite = Art.Meteor;
+                m.sr.color = Color.white;
+                m.tf.localScale = Vector3.one * (s.evolved ? 1.6f : 1.25f);
+                m.tf.position = new Vector3(m.from.x, m.from.y, 0f);
+                // 떨어질 자리: 붉은 그림자가 점점 커진다
+                SpawnFx(at, Art.Circle, new Color(1f, 0.3f, 0.2f, 0.35f), radius * 0.3f, radius * 2f, m.duration, -3);
+            }
+        }
+
+        void UpdateMeteors(float dt)
+        {
+            var list = meteors.Active;
+            Color c = Passive.Colors[Passive.Meteor];
+            for (int i = 0; i < list.Count; i++)
+            {
+                var m = list[i];
+                if (!m.alive) continue;
+                m.t += dt;
+                float k = m.t / m.duration;
+                if (k >= 1f)
+                {
+                    m.alive = false;
+                    Blast(m.to, m.radius, m.damage, c, 0f);
+                    SpawnFx(m.to, Art.Puddle, new Color(0.08f, 0.05f, 0.05f, 0.6f), m.radius * 1.8f, m.radius * 2f, 1.6f, -4);   // 그을린 자국
+                    Shake(0.35f);
+                    if (m.burn) SpawnZone(ZoneKind.Fire, m.to, m.radius * 0.9f, Tune.BurnTime * Duration, Tune.BurnTick, m.damage * Tune.BurnRatio, 1f);
+                    continue;
+                }
+                Vector2 p = Vector2.Lerp(m.from, m.to, k * k);
+                m.tf.position = new Vector3(p.x, p.y, 0f);
+                m.tf.rotation = Quaternion.Euler(0f, 0f, m.t * 400f);
+                if (stepCount % 2 == 0)
+                {
+                    var f = SpawnFx(p, Art.Glow, c, 0.6f, 0.1f, 0.3f, 11);
+                    if (f != null) f.vel = new Vector2(-1.2f, 2.5f) * 0.3f;
+                }
+            }
+        }
+
+        // ---- 장판 (산성·불·블랙홀) ----
+        Zone SpawnZone(ZoneKind kind, Vector2 at, float radius, float duration, float tick, float dmg, float slow)
+        {
+            var z = zones.Get();
+            z.kind = kind;
+            z.pos = at; z.radius = radius;
+            z.life = z.duration = duration;
+            z.tickEvery = tick; z.tick = 0.05f;
+            z.damage = dmg; z.slow = slow;
+            z.pull = 0f; z.collapse = 0f; z.spin = Random.value * 360f;
+            z.color = kind == ZoneKind.Acid ? Passive.Colors[Passive.Acid] : kind == ZoneKind.Fire ? Passive.Colors[Passive.Meteor] : Passive.Colors[Passive.Vortex];
+            z.sr.sprite = kind == ZoneKind.Vortex ? Art.Spiral : Art.Puddle;
+            z.sr.sortingOrder = kind == ZoneKind.Vortex ? 3 : -4;
+            z.sr.color = Palette.Fade(z.color, 0f);
+            z.tf.position = new Vector3(at.x, at.y, 0f);
+            z.tf.rotation = Quaternion.Euler(0f, 0f, z.spin);
+            z.tf.localScale = Vector3.zero;
+            return z;
+        }
+
+        void UpdateZones(float dt)
+        {
+            var list = zones.Active;
+            var elist = enemies.Active;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var z = list[i];
+                if (!z.alive) continue;
+                z.life -= dt;
+                if (z.life <= 0)
+                {
+                    z.alive = false;
+                    if (z.collapse > 0) { Blast(z.pos, z.radius * 1.3f, z.collapse, z.color, 0f); Shake(0.5f); }
+                    continue;
+                }
+                float age = z.duration - z.life;
+                float grow = Mathf.Min(1f, age * 6f), fade = Mathf.Min(1f, z.life * 2.5f);
+                bool vortex = z.kind == ZoneKind.Vortex;
+                z.tf.localScale = Vector3.one * (z.radius * 2f * (vortex ? 1.1f : 1.15f) * grow);
+                z.sr.color = Palette.Fade(z.color, (vortex ? 0.9f : 0.6f) * fade);
+
+                if (vortex)
+                {
+                    z.spin -= dt * 420f;
+                    z.tf.rotation = Quaternion.Euler(0f, 0f, z.spin);
+                    float reach = z.radius * 1.5f;
+                    for (int k = 0; k < elist.Count; k++)
+                    {
+                        var e = elist[k];
+                        if (!e.alive) continue;
+                        Vector2 to = z.pos - e.pos;
+                        float d = to.magnitude;
+                        if (d > reach + e.radius || d < 0.05f) continue;
+                        e.pos += to / d * (z.pull * dt * (e.IsBoss ? 0.15f : 1f) * Mathf.Min(1f, d));
+                    }
+                    if (stepCount % 2 == 0)
+                    {
+                        Vector2 dir = Rotate(Vector2.right, Random.value * Mathf.PI * 2f);
+                        var f = SpawnFx(z.pos + dir * reach, Art.Glow, z.color, 0.25f, 0.05f, 0.4f, 11);
+                        if (f != null) f.vel = -dir * reach * 2.4f;
+                    }
+                }
+                else if (stepCount % 5 == 0)
+                {
+                    var f = SpawnFx(z.pos + Random.insideUnitCircle * z.radius * 0.8f, Art.Glow, Color.Lerp(z.color, Color.white, 0.4f), 0.12f, 0.3f, 0.45f, -3);
+                    if (f != null) f.vel = new Vector2(0f, 0.35f);
+                }
+
+                z.tick -= dt;
+                if (z.tick > 0) continue;
+                z.tick += z.tickEvery;
+                for (int k = 0; k < elist.Count; k++)
+                {
+                    var e = elist[k];
+                    if (!e.alive || !InReach(e, z.pos, z.radius)) continue;
+                    if (z.slow < 1f) Slow(e, z.slow, 0.6f);
+                    bool crit;
+                    float hit = RollCrit(z.damage, out crit);
+                    DealDamage(e, hit, crit, 0, HitKind.Passive);
+                }
+            }
+        }
+
+        // ---- 공용 ----
+
+        // 스킬 범위 공격: 치명타가 터지고, 처치 폭발도 일으킨다 (직접 공격 취급)
+        void Blast(Vector2 at, float radius, float dmg, Color color, float stun)
+        {
+            Glow(at, color, radius * 2.6f, 0.25f);
+            SpawnFx(at, Art.Circle, Palette.Fade(color, 0.4f), radius * 0.5f, radius * 2f, 0.2f, 4);
+            SpawnFx(at, Art.Ring, color, radius * 0.6f, radius * 2.2f, 0.3f, 10);
+            Sparks(at, color, 6, radius * 4f, 0.1f, 0.3f);
+            var list = enemies.Active;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var e = list[i];
+                if (!e.alive || !InReach(e, at, radius)) continue;
+                if (stun > 0) e.stun = Mathf.Max(e.stun, stun * (e.IsBoss ? Tune.BossResist : 1f));
+                bool crit;
+                float hit = RollCrit(dmg, out crit);
+                DealDamage(e, hit, crit, 0, HitKind.Passive);
+            }
+        }
+
+        void ChainLightning(Enemy from, float dmg, int hops, Color color)
+        {
+            chainSet.Clear();
+            chainSet.Add(from);
+            Enemy cur = from;
+            for (int k = 0; k < hops; k++)
+            {
+                Enemy next = Nearest(cur.pos, Tune.ChainRange, chainSet);
+                if (next == null) break;
+                chainSet.Add(next);
+                Lightning(cur.pos, next.pos, color, 0.05f);
+                DealDamage(next, dmg, false, 1, HitKind.Passive);
+                cur = next;
+            }
+        }
+
+        void Slow(Enemy e, float factor, float time)
+        {
+            if (e.IsBoss) factor = Mathf.Lerp(factor, 1f, 0.6f);
+            e.slowFactor = elapsed >= e.slowUntil ? factor : Mathf.Min(e.slowFactor, factor);
+            e.slowUntil = Mathf.Max(e.slowUntil, elapsed + time);
+        }
+
+        void After(float delay, System.Action action)
+        {
+            delayed.Add(new Delayed { t = delay, action = action });
+        }
+
+        void UpdateDelayed(float dt)
+        {
+            for (int i = delayed.Count - 1; i >= 0; i--)
+            {
+                if (i >= delayed.Count) continue;
+                var d = delayed[i];
+                d.t -= dt;
+                if (d.t > 0) continue;
+                delayed.RemoveAt(i);
+                d.action();
+            }
+        }
+
+        static Vector2 Rotate(Vector2 v, float radians)
+        {
+            float c = Mathf.Cos(radians), s = Mathf.Sin(radians);
+            return new Vector2(v.x * c - v.y * s, v.x * s + v.y * c);
+        }
+
+        static Vector2 RotateTowards(Vector2 from, Vector2 to, float maxRadians)
+        {
+            float angle = Mathf.Atan2(from.x * to.y - from.y * to.x, from.x * to.x + from.y * to.y);
+            return Rotate(from, Mathf.Clamp(angle, -maxRadians, maxRadians));
+        }
+
+        static float DistToSegment(Vector2 p, Vector2 a, Vector2 b)
+        {
+            Vector2 ab = b - a;
+            float t = Mathf.Clamp01(((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / Mathf.Max(1e-6f, ab.sqrMagnitude));
+            return (a + ab * t - p).magnitude;
+        }
+
+        // ---- 화려한 효과 ----
+
+        Fx Glow(Vector2 at, Color color, float size, float life)
+        {
+            return SpawnFx(at, Art.Glow, color, size, size * 1.3f, life, 11);
+        }
+
+        void Sparks(Vector2 at, Color color, int n, float speed, float size, float life)
+        {
+            for (int i = 0; i < n; i++)
+            {
+                var f = SpawnFx(at, Art.Glow, color, size * 2.4f, 0f, life * Random.Range(0.6f, 1.2f), 12);
+                if (f == null) return;
+                f.vel = Rotate(Vector2.right, Random.value * Mathf.PI * 2f) * speed * Random.Range(0.4f, 1f);
+                f.drag = 4f;
+            }
+        }
+
+        Fx Beam(Vector2 a, Vector2 b, float width, Color color, float life, int order)
+        {
+            Vector2 d = b - a;
+            var f = SpawnFx((a + b) * 0.5f, Art.Pixel, color, 1f, 1f, life, order);
+            if (f == null) return null;
+            f.size = new Vector2(d.magnitude, width);
+            f.tf.localScale = new Vector3(d.magnitude, width, 1f);
+            f.tf.rotation = Quaternion.Euler(0f, 0f, Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg);
+            return f;
+        }
+
+        void Lightning(Vector2 from, Vector2 to, Color color, float width)
+        {
+            const int segments = 6;
+            Vector2 prev = from;
+            for (int i = 1; i <= segments; i++)
+            {
+                Vector2 next = Vector2.Lerp(from, to, i / (float)segments);
+                if (i < segments) next += new Vector2(Random.Range(-0.25f, 0.25f), Random.Range(-0.1f, 0.1f));
+                Beam(prev, next, width * 3.5f, Palette.Fade(color, 0.45f), 0.2f, 11);
+                Beam(prev, next, width, Color.white, 0.16f, 12);
+                prev = next;
+            }
+            Glow(to, color, 1.4f, 0.25f);
+        }
+
+        // 플레이어 잔상
+        void Ghost(Vector2 at, float alpha)
+        {
+            var f = SpawnFx(at, playerSr.sprite, Palette.Fade(Palette.Haste, alpha), 1f, 1f, 0.3f, 7);
+            if (f != null) f.sr.flipX = playerSr.flipX;
         }
 
         // ================================================================ 적
@@ -615,6 +1271,9 @@ namespace ArcaneDrift
             e.knock = Vector2.zero;
             e.stun = e.flash = e.fade = 0f;
             e.contactReady = 0f;
+            e.shurikenReady = e.laserReady = 0f;
+            e.slowUntil = e.iceUntil = 0f;
+            e.slowFactor = 1f;
             e.barrage = 1f;
             e.sr.sprite = Art.Monster[e.look];
             e.sr.sortingOrder = order;
@@ -636,7 +1295,7 @@ namespace ArcaneDrift
                 Vector2 to = ppos - e.pos;
                 float d = to.magnitude;
                 if (e.stun > 0) e.stun -= dt;
-                else if (d > 0.001f) e.pos += to / d * (e.speed * dt);
+                else if (d > 0.001f) e.pos += to / d * (e.speed * (elapsed < e.slowUntil ? e.slowFactor : 1f) * dt);
                 e.pos += e.knock * dt;
                 e.knock *= knockDecay;
 
@@ -677,7 +1336,10 @@ namespace ArcaneDrift
                 e.tf.localScale = new Vector3(size * (1f - 0.05f * wobble), size * (1f + 0.07f * wobble), 1f);
                 e.sr.flipX = ppos.x < e.pos.x;   // 그림은 오른쪽을 보고 있다. 플레이어 쪽을 보게
                 e.sr.sprite = e.flash > 0 ? Art.MonsterFlash[e.look] : Art.Monster[e.look];
-                e.sr.color = e.stun > 0 ? Palette.Stunned : Color.white;
+                e.sr.color = elapsed < e.iceUntil ? Palette.Ice
+                    : e.stun > 0 ? Palette.Stunned
+                    : elapsed < e.slowUntil && e.slowFactor < 1f ? Palette.Slowed
+                    : Color.white;
             }
         }
 
@@ -719,13 +1381,14 @@ namespace ArcaneDrift
             }
         }
 
-        void DealDamage(Enemy e, float dmg, bool crit, int depth, bool skill = false)
+        void DealDamage(Enemy e, float dmg, bool crit, int depth, HitKind kind = HitKind.Basic)
         {
             if (!e.alive) return;
             e.hp -= dmg;
             e.flash = 0.08f;
-            Color textColor = crit ? Palette.Crit : skill ? Palette.SkillHit : Palette.DamageText;
-            AddText(e.pos + new Vector2(0, e.radius + 0.1f), Mathf.RoundToInt(dmg).ToString(), textColor, crit || skill);
+            Color textColor = crit ? Palette.Crit : kind == HitKind.Skill ? Palette.SkillHit : kind == HitKind.Passive ? Palette.PassiveHit : Palette.DamageText;
+            // 패시브 피해 숫자는 작게 (화면이 숫자로 덮이지 않게)
+            AddText(e.pos + new Vector2(0, e.radius + 0.1f), Mathf.RoundToInt(dmg).ToString(), textColor, crit || kind == HitKind.Skill, kind == HitKind.Passive && !crit);
             if (e.hp <= 0) Kill(e, depth);
         }
 
@@ -737,8 +1400,10 @@ namespace ArcaneDrift
             if (dashing) dashKilled = true;
             SpawnOrb(e.pos, e.xp);
             SpawnFx(e.pos, Art.Circle, Palette.Fade(e.color, 0.6f), e.radius * 2f, e.radius * 3.2f, 0.25f, 4);
+            Sparks(e.pos, e.color, e.IsBoss ? 24 : 3, e.IsBoss ? 5f : 2f, e.IsBoss ? 0.2f : 0.08f, 0.3f);
             if (e.IsBoss)
             {
+                Glow(e.pos, e.color, e.radius * 8f, 0.6f);
                 SpawnFx(e.pos, Art.Ring, e.color, e.radius * 2f, e.radius * 8f, 0.6f, 10);
                 Announce(e.rank == Rank.BigBoss ? "대형 보스 처치!" : "보스 처치!");
                 Shake(1f);
@@ -749,7 +1414,9 @@ namespace ArcaneDrift
 
         void Explosion(Vector2 at, float radius, float dmg, int depth, Color color, Enemy skip)
         {
+            Glow(at, color, radius * 2.2f, 0.2f);
             SpawnFx(at, Art.Circle, Palette.Fade(color, 0.45f), radius * 0.6f, radius * 2f, 0.22f, 4);
+            Sparks(at, color, 3, radius * 3f, 0.07f, 0.2f);
             var list = enemies.Active;
             for (int i = 0; i < list.Count; i++)
             {
@@ -852,6 +1519,8 @@ namespace ArcaneDrift
             p.target = null; p.targetSerial = 0;
             p.pierceLeft = 0; p.bouncesLeft = 0; p.evolved = false;
             p.hit.Clear();   // 풀에서 꺼낼 때 꼭 비운다 (안 비우면 같은 적을 영원히 못 맞힌다)
+            p.trail = 0f;
+            p.tf.rotation = Quaternion.identity;
             p.sr.sprite = Art.Circle;
             p.sr.color = color;
             p.sr.enabled = true;
@@ -900,11 +1569,43 @@ namespace ArcaneDrift
                 {
                     if (p.kind == ProjKind.QBolt && p.evolved)
                     {
-                        Explosion(p.pos, Tune.QExplodeRadius, p.damage * Tune.QExplodeRatio, 1, Palette.Legendary, null);
+                        Explosion(p.pos, Tune.QExplodeRadius * (1 + mods.skillArea), p.damage * Tune.QExplodeRatio, 1, Palette.Legendary, null);
                         Shake(0.5f);
                     }
+                    if (p.kind == ProjKind.Missile) { MissileBoom(p); continue; }
                     p.alive = false;
                     continue;
+                }
+
+                if (p.kind == ProjKind.Missile)
+                {
+                    // 미사일: 점점 빨라지며 대상 쪽으로 방향을 튼다. 대상이 죽으면 근처 적으로
+                    Enemy t = Valid(p.target, p.targetSerial);
+                    if (t == null)
+                    {
+                        t = Nearest(p.pos, 5f, null);
+                        if (t != null) { p.target = t; p.targetSerial = t.serial; }
+                    }
+                    float speed = Mathf.Min(Tune.MissileSpeed, p.vel.magnitude + Tune.MissileAccel * dt);
+                    Vector2 cur = DirOr(p.vel, Vector2.up);
+                    if (t != null) cur = RotateTowards(cur, DirOr(t.pos - p.pos, cur), Tune.MissileTurn * dt);
+                    p.vel = cur * speed;
+                    p.tf.rotation = Quaternion.Euler(0f, 0f, Mathf.Atan2(cur.y, cur.x) * Mathf.Rad2Deg);
+                    if (stepCount % 2 == 0) SpawnFx(p.pos - cur * 0.16f, Art.Glow, new Color(0.75f, 0.75f, 0.8f, 0.5f), 0.12f, 0.4f, 0.4f, 8);
+                }
+                else if (p.kind == ProjKind.QBolt)
+                {
+                    // Q 꼬리 빛, 마력 잔류 증강이면 지나간 길에 작은 폭발
+                    if (stepCount % 2 == 0) SpawnFx(p.pos, Art.Glow, p.sr.color, p.radius * 5f, 0f, 0.25f, 8);
+                    if (mods.qTrail)
+                    {
+                        p.trail += p.speed * dt;
+                        if (p.trail >= Tune.QTrailEvery)
+                        {
+                            p.trail -= Tune.QTrailEvery;
+                            Explosion(p.pos, Tune.QTrailRadius * (1 + mods.skillArea), p.damage * Tune.QTrailRatio, 1, p.sr.color, null);
+                        }
+                    }
                 }
 
                 if (p.kind == ProjKind.Basic)
@@ -929,12 +1630,14 @@ namespace ArcaneDrift
                     var e = elist[k];
                     if (!e.alive || p.hit.Contains(e) || !InReach(e, p.pos, p.radius)) continue;
                     if (p.kind == ProjKind.Basic) { OnBoltHit(p, e); break; }
+                    if (p.kind == ProjKind.Missile) { MissileBoom(p); break; }
 
                     // Q: 관통하며 닿는 모든 적을 한 번씩
                     p.hit.Add(e);
                     bool crit;
                     float hit = RollCrit(p.damage, out crit);
-                    DealDamage(e, hit, crit, 0, true);
+                    DealDamage(e, hit, crit, 0, HitKind.Skill);
+                    Sparks(e.pos, p.sr.color, 4, 2.5f, 0.08f, 0.2f);
                 }
             }
         }
@@ -945,6 +1648,7 @@ namespace ArcaneDrift
             bool crit;
             float dmg = RollCrit(p.damage, out crit);
             DealDamage(e, dmg, crit, 0);
+            Sparks(e.pos, Palette.Bolt, crit ? 4 : 1, 1.6f, 0.06f, 0.15f);
             if (mods.lifesteal > 0) Heal(dmg * mods.lifesteal);
             OnHitEffects(e, dmg, crit);
 
@@ -1073,6 +1777,8 @@ namespace ArcaneDrift
                 stacks.TryGetValue(a.id, out have);
                 if (have >= a.maxStacks) continue;
                 if (a.needsAllSkills && !AllSkillsLearned) continue;
+                if (a.needsSkill >= 0 && skills[a.needsSkill].level == 0) continue;       // 그 스킬을 배워야 나오는 증강
+                if (a.needsPassive >= 0 && passives[a.needsPassive].level == 0) continue;
                 pool.Add(Card.ForAugment(a, have));
                 weights.Add(Tune.RarityWeight[(int)a.rarity]);
             }
@@ -1082,6 +1788,14 @@ namespace ArcaneDrift
                 if (s.level == 0) { pool.Add(Card.Unlock(i)); weights.Add(Tune.SkillUnlockWeight); }
                 else if (s.level < Tune.MaxSkillLevel) { pool.Add(Card.LevelUp(i, s.level, mods.SkillCdMult)); weights.Add(Tune.SkillLevelWeight); }
                 else if (!s.evolved) evolves.Add(Card.Evolve(i));
+            }
+            int owned = OwnedPassives;
+            for (int id = 0; id < Passive.Count; id++)
+            {
+                var ps = passives[id];
+                if (ps.level == 0) { if (owned < Tune.PassiveSlots) { pool.Add(Card.PassiveUnlock(id)); weights.Add(Tune.PassiveUnlockWeight); } }
+                else if (ps.level < Tune.MaxSkillLevel) { pool.Add(Card.PassiveLevel(id, ps.level)); weights.Add(Tune.PassiveLevelWeight); }
+                else if (!ps.evolved) evolves.Add(Card.PassiveEvolve(id));
             }
 
             // 진화 카드가 후보에 있으면 1장은 반드시 진화 카드
@@ -1122,9 +1836,12 @@ namespace ArcaneDrift
                     // 최대 체력이 늘면 늘어난 만큼 현재 체력도 채운다
                     foreach (var fx in c.augment.effects) hp += AugmentApplier.Apply(mods, fx);
                     break;
-                case CardKind.SkillUnlock: skills[c.skill].level = 1; skills[c.skill].cdLeft = 0; break;
+                case CardKind.SkillUnlock: skills[c.skill].level = 1; skills[c.skill].cdLeft = 0; skills[c.skill].stock = 0; break;
                 case CardKind.SkillLevel: skills[c.skill].level++; break;
                 case CardKind.SkillEvolve: skills[c.skill].evolved = true; break;
+                case CardKind.PassiveUnlock: passives[c.passive].level = 1; passives[c.passive].timer = 0.5f; break;
+                case CardKind.PassiveLevel: passives[c.passive].level++; break;
+                case CardKind.PassiveEvolve: passives[c.passive].evolved = true; break;
                 case CardKind.Heal: Heal(Tune.HealCard); break;
             }
             hp = Mathf.Min(hp, MaxHp);
@@ -1136,16 +1853,22 @@ namespace ArcaneDrift
 
         // ================================================================ 효과
 
-        void SpawnFx(Vector2 at, Sprite sprite, Color color, float fromSize, float toSize, float life, int order)
+        // 효과 하나. 너무 많으면 null (효과가 몇 개 빠질 뿐 게임에는 영향 없음)
+        Fx SpawnFx(Vector2 at, Sprite sprite, Color color, float fromSize, float toSize, float life, int order)
         {
-            if (fxs.Count >= Tune.MaxFx) return;
+            if (fxs.Count >= Tune.MaxFx) return null;
             var f = fxs.Get();
             f.pos = at; f.age = 0f; f.life = life; f.from = fromSize; f.to = toSize; f.color = color;
+            f.vel = Vector2.zero; f.drag = 0f; f.spin = 0f; f.rot = 0f;
+            f.size = Vector2.one;
             f.sr.sprite = sprite;
             f.sr.sortingOrder = order;
             f.sr.color = color;
+            f.sr.flipX = false;
             f.tf.position = new Vector3(at.x, at.y, 0f);
+            f.tf.rotation = Quaternion.identity;
             f.tf.localScale = Vector3.one * fromSize;
+            return f;
         }
 
         void UpdateFx(float dt)
@@ -1158,7 +1881,19 @@ namespace ArcaneDrift
                 f.age += dt;
                 float k = f.age / f.life;
                 if (k >= 1f) { f.alive = false; continue; }
-                f.tf.localScale = Vector3.one * Mathf.Lerp(f.from, f.to, k);
+                if (f.vel.sqrMagnitude > 0f)
+                {
+                    f.pos += f.vel * dt;
+                    if (f.drag > 0f) f.vel *= Mathf.Exp(-f.drag * dt);
+                    f.tf.position = new Vector3(f.pos.x, f.pos.y, 0f);
+                }
+                if (f.spin != 0f)
+                {
+                    f.rot += f.spin * dt;
+                    f.tf.rotation = Quaternion.Euler(0f, 0f, f.rot);
+                }
+                float scale = Mathf.Lerp(f.from, f.to, k);
+                f.tf.localScale = new Vector3(f.size.x * scale, f.size.y * scale, 1f);
                 f.sr.color = Palette.Fade(f.color, f.color.a * (1f - k));
             }
 
@@ -1171,10 +1906,10 @@ namespace ArcaneDrift
             }
         }
 
-        void AddText(Vector2 at, string text, Color color, bool big)
+        void AddText(Vector2 at, string text, Color color, bool big, bool small = false)
         {
             if (texts.Count >= Tune.MaxTexts) texts.RemoveAt(0);
-            texts.Add(new FloatText { pos = at + Random.insideUnitCircle * 0.06f, text = text, color = color, big = big });
+            texts.Add(new FloatText { pos = at + Random.insideUnitCircle * 0.06f, text = text, color = color, big = big, small = small });
         }
 
         void Shake(float amount)
@@ -1270,7 +2005,7 @@ namespace ArcaneDrift
                 Vector3 sp = cam.WorldToScreenPoint(new Vector3(t.pos.x, t.pos.y, 0f));
                 float x = sp.x / u, y = (Screen.height - sp.y) / u;
                 float a = 1f - t.age / FloatTextLife;
-                Text(new Rect(x - 50, y - 14, 100, 28), t.text, t.big ? 20 : 14, Palette.Fade(t.color, a), TextAnchor.MiddleCenter, t.big);
+                Text(new Rect(x - 50, y - 14, 100, 28), t.text, t.big ? 20 : t.small ? 11 : 14, Palette.Fade(t.color, a), TextAnchor.MiddleCenter, t.big);
             }
         }
 
@@ -1304,9 +2039,10 @@ namespace ArcaneDrift
 
             // 처음 몇 초 동안 조작 안내
             if (elapsed < 12f)
-                Text(new Rect(0, 572, vw, 24), "우클릭: 이동   ·   좌클릭: 공격할 적 지정   ·   Q W E: 스킬   ·   Tab: 내 빌드   ·   Esc: 일시정지", 15, Palette.Muted, TextAnchor.MiddleCenter);
+                Text(new Rect(0, 548, vw, 24), "우클릭: 이동   ·   좌클릭: 공격할 적 지정   ·   Q W E: 스킬   ·   Tab: 내 빌드   ·   Esc: 일시정지", 15, Palette.Muted, TextAnchor.MiddleCenter);
 
             DrawSkills();
+            DrawPassives();
 
             // 경험치
             Fill(new Rect(0, 710, vw, 10), Palette.Panel);
@@ -1337,7 +2073,30 @@ namespace ArcaneDrift
                     Text(r, s.cdLeft.ToString("0.0"), 18, Color.white, TextAnchor.MiddleCenter, true);
                 }
                 else Text(r, SkillState.Keys[i], 26, Color.white, TextAnchor.MiddleCenter, true);
+                if (i == 2 && mods.eCharges > 0 && s.cdLeft <= 0)
+                    Text(new Rect(r.x, r.y + 2, size - 4, 18), "×" + (s.stock > 0 ? s.stock : 1 + mods.eCharges), 12, Palette.Marker, TextAnchor.UpperRight, true);
                 Text(new Rect(r.x - 10, r.y + size + 2, size + 20, 18), s.evolved ? "진화" : "Lv " + s.level, 12, c, TextAnchor.UpperCenter, true);
+            }
+        }
+
+        // 가진 패시브 스킬: Q W E 위에 작은 칸으로
+        void DrawPassives()
+        {
+            int n = OwnedPassives;
+            if (n == 0) return;
+            const float w = 78f, h = 24f, gap = 6f;
+            float x = (vw - (n * w + (n - 1) * gap)) / 2f, y = 584f;
+            for (int id = 0; id < Passive.Count; id++)
+            {
+                var s = passives[id];
+                if (s.level == 0) continue;
+                Color c = Passive.Colors[id];
+                Rect r = new Rect(x, y, w, h);
+                Fill(r, Palette.Panel);
+                Fill(new Rect(x, y, 3, h), c);
+                if (id == Passive.Laser && s.active > 0) Fill(new Rect(x + 3, y + h - 3, w - 3, 3), c);
+                Text(new Rect(x + 4, y, w - 4, h), Passive.Short[id] + " " + (s.evolved ? "★" : s.level.ToString()), 12, c, TextAnchor.MiddleCenter, true);
+                x += w + gap;
             }
         }
 
@@ -1351,7 +2110,7 @@ namespace ArcaneDrift
             if (Button(new Rect(vw / 2f - 120, 340, 240, 56), "시작하기", Palette.ButtonPrimary)) StartRun();
             Text(new Rect(0, 402, vw, 22), "Enter 또는 Space 로도 시작", 14, Palette.Muted, TextAnchor.MiddleCenter);
             Text(new Rect(vw / 2f - 300, 460, 600, 120),
-                "우클릭: 이동   ·   적을 좌클릭: 추격하며 자동 공격\nQ W E: 스킬 (레벨업 카드로 배우고 강화)\n1~4: 카드 선택   ·   Tab: 내 빌드 보기   ·   Esc: 일시정지",
+                "우클릭: 이동   ·   적을 좌클릭: 추격하며 자동 공격\nQ W E: 스킬   ·   패시브 스킬 8종은 알아서 발동 (레벨업 카드로 배우고 강화)\n1~4: 카드 선택   ·   Tab: 내 빌드 보기   ·   Esc: 일시정지",
                 16, Palette.Body, TextAnchor.UpperCenter, false, true);
         }
 
@@ -1455,9 +2214,21 @@ namespace ArcaneDrift
                     Text(new Rect(x, y + 24, colW, 20), "피해 " + Mathf.RoundToInt(SkillDamage(i, coef)) + "   ·   쿨다운 " + Tune.Cooldown(i, sk.level, mods.SkillCdMult).ToString("0.0") + "초",
                         14, Palette.Body, TextAnchor.MiddleLeft);
                 }
-                y += 60;
+                y += 50;
             }
-            Text(new Rect(x, y + 6, colW, 22), "생존 " + FormatTime(elapsed) + "   ·   처치 " + kills + "   ·   Lv " + level, 14, Palette.Muted, TextAnchor.MiddleLeft);
+            Text(new Rect(x, y, colW, 24), "패시브 스킬  " + OwnedPassives + " / " + Tune.PassiveSlots, 17, Palette.Skill, TextAnchor.MiddleLeft, true);
+            y += 28;
+            for (int id = 0; id < Passive.Count; id++)
+            {
+                var ps = passives[id];
+                if (ps.level == 0) continue;
+                Color c = ps.evolved ? Palette.Legendary : Passive.Colors[id];
+                Text(new Rect(x, y, colW, 20), (ps.evolved ? Passive.EvolveNames[id] : Passive.Names[id]) + "   " + (ps.evolved ? "진화" : "Lv " + ps.level), 15, c, TextAnchor.MiddleLeft, true);
+                Text(new Rect(x, y + 19, colW, 18), "피해 " + Mathf.RoundToInt(PassiveDamage(id, Passive.Coef(id, ps.level))) + (id == Passive.Shuriken ? "" : "   ·   쿨다운 " + Passive.Cooldown(id, ps.level, mods.SkillCdMult).ToString("0.0") + "초"),
+                    12, Palette.Body, TextAnchor.MiddleLeft);
+                y += 40;
+            }
+            Text(new Rect(x, y + 6, colW, 22), "생존 " + FormatTime(elapsed) + "   ·   처치 " + kills + "   ·   Lv " + level + "   ·   레벨 보너스 ×" + LevelBonus.ToString("0.00"), 13, Palette.Muted, TextAnchor.MiddleLeft);
 
             // 3) 고른 증강 (고른 순서)
             x = x0 + (colW + gap) * 2; y = y0;
@@ -1535,8 +2306,12 @@ namespace ArcaneDrift
         public const int StartingAugments = 1;   // 사용자 요청: 시작하자마자 증강 카드 선택
 
         public const float SpawnMin = 5.6f, SpawnMax = 7.0f;
-        public static float SpawnInterval(float t) { return Mathf.Max(0.16f, 1.05f - t * 0.002f); }
-        public static int SpawnCount(float t) { return Mathf.Min(1 + Mathf.FloorToInt(t / 35f), 5); }
+        // 원본: 간격 max(0.16, 1.05 - t×0.002), 한 번에 min(1 + t/35, 5)마리.
+        // 사용자 요청으로 덜 나오게: 간격 × SpawnIntervalMult, 한 번에 나오는 수는 45초마다 1씩, 최대 4마리
+        public const float SpawnIntervalMult = 1.4f;
+        public static float SpawnInterval(float t) { return Mathf.Max(0.16f, 1.05f - t * 0.002f) * SpawnIntervalMult; }
+        public static int SpawnCount(float t) { return Mathf.Min(1 + Mathf.FloorToInt(t / 45f), 4); }
+        public const float DamagePerLevel = 0.04f;   // 레벨마다 모든 피해 +4% (몬스터 체력이 시간에 따라 계속 늘어나서)
         public static float HpScale(float t) { return 1 + t / 50f; }
         public static float DamageScale(float t) { return 1 + t / 140f; }
         public static float SpeedScale(float t) { return 1 + Mathf.Min(t / 320f, 0.7f); }
@@ -1573,7 +2348,7 @@ namespace ArcaneDrift
         public const int MaxSkillLevel = 5;
         public static readonly float[] EvolveDamage = { 1.6f, 1.5f, 1.5f };
         // 사용자 요청: 스킬 피해를 시원하게. Q·W·E 피해 계수(위 QDamage·WDamage·EDamage)에 모두 곱한다 (원본 1)
-        public const float SkillDamageBoost = 3f;
+        public const float SkillDamageBoost = 4.5f;   // 사용자 요청으로 3 → 4.5 (패시브 스킬에도 똑같이 곱한다)
         public const float ShakeStrength = 0.12f;   // 스킬 쓸 때 화면 흔들림 세기 (0 이면 안 흔들림)
         public const float WEvolveRadius = 0.7f, WEvolveStun = 0.6f;
         public const int EDashSteps = 14;
@@ -1583,7 +2358,7 @@ namespace ArcaneDrift
         public static readonly float[] RarityWeight = { 100f, 55f, 25f, 8f };
 
         // ---- 무한 모드 때문에 새로 생긴 수치 [임시] ----
-        public const int MaxEnemies = 350;
+        public const int MaxEnemies = 300;
         public const float RecycleDistance = 11f;
 
         // ---- 원본을 확인하지 못해 정한 수치 [임시] ----
@@ -1596,14 +2371,37 @@ namespace ArcaneDrift
         public const float BossRadius = 0.45f, BigBossRadius = 0.65f, BossResist = 0.15f;
         public const float BarrageRange = 4.5f, BossBarrageEvery = 2.2f, BigBossBarrageEvery = 1.8f;
         public const float BulletSpeed = 2.4f, BulletRadius = 0.08f, BulletDamageRatio = 0.5f, BulletLife = 5f;
-        public const float SkillUnlockWeight = 150f, SkillLevelWeight = 90f;   // 증강 20여 종 사이에서 스킬 카드가 너무 드물게 나오지 않도록
+        public const float SkillUnlockWeight = 110f, SkillLevelWeight = 75f;   // 증강 사이에서 스킬 카드가 너무 드물게 나오지 않도록
+
+        // ---- 패시브 스킬 (사용자 요청으로 추가) ----
+        public const int PassiveSlots = 6;                    // 한 번에 가질 수 있는 패시브 수
+        public const float PassiveUnlockWeight = 110f, PassiveLevelWeight = 75f;
+        public const float PassiveEvolveDamage = 1.5f;
+        public const float ResonanceDamage = 1.35f;
+        public const float ShurikenOrbit = 0.85f, ShurikenOrbitPerLv = 0.08f, ShurikenSpin = 3.4f, ShurikenHitRadius = 0.16f, ShurikenHitEvery = 0.4f;
+        public const float ShurikenFastMult = 1.6f, ShurikenFastDamage = 1.2f;
+        public const int ShurikenEvolveExtra = 3;
+        public const float ThunderRange = 7f, ThunderRadius = 0.55f, ThunderStun = 0.6f;
+        public const float AcidRange = 6f, AcidRadius = 0.7f, AcidRadiusPerLv = 0.06f, AcidTime = 3f, AcidTick = 0.5f;
+        public const float AcidCorrodeDamage = 1.3f, AcidCorrodeSlow = 0.6f, AcidEvolveSlow = 0.7f;
+        public const float MissileRange = 8f, MissileSpeed = 5.5f, MissileAccel = 6f, MissileTurn = 7f, MissileLife = 3f, MissileRadius = 0.12f, MissileBlast = 0.55f;
+        public const float FrostRadius = 1.4f, FrostRadiusPerLv = 0.12f, FrostSlow = 0.5f, FrostSlowTime = 2f;
+        public const float LaserTime = 2.2f, LaserSpin = 2.6f, LaserLength = 3f, LaserLengthPerLv = 0.2f, LaserWidth = 0.16f, LaserHitEvery = 0.2f, LaserPowerDamage = 1.3f;
+        public const float VortexRange = 6f, VortexRadius = 1.1f, VortexRadiusPerLv = 0.08f, VortexTime = 2.6f, VortexTick = 0.3f, VortexPull = 2.4f, VortexCollapseRatio = 4f;
+        public const float MeteorRange = 7f, MeteorRadius = 0.9f, MeteorRadiusPerLv = 0.06f, MeteorFall = 0.7f;
+        public const float BurnTime = 3f, BurnTick = 0.5f, BurnRatio = 0.12f;
+
+        // ---- Q W E 증강 ----
+        public const float QSpreadDeg = 12f, QGiantSize = 1.8f, QGiantDamage = 1.25f, QTrailEvery = 0.8f, QTrailRadius = 0.45f, QTrailRatio = 0.35f;
+        public const float WDoubleDelay = 0.4f, WDoubleRatio = 0.7f, WPullDamage = 1.2f;
+        public const float EAfterDelay = 0.3f, EAfterRatio = 0.6f, EAfterRadius = 0.6f, EGuardTime = 0.8f;
         public const float HitExplodeRadius = 0.6f, AftermathRadius = 0.8f, KillExplodeRadius = 0.7f;
         public const float ChainRange = 1.8f, ChainRatio = 0.5f, RicochetRange = 2.5f;
         public const int ChainTargets = 3;
         public const float SynergyCdCut = 1f, SynergyDamage = 1.3f;
         public const float MinSkillCdMult = 0.4f;
         public const float HealCard = 30f;
-        public const int MaxOrbs = 300, MaxTexts = 80, MaxFx = 260;
+        public const int MaxOrbs = 300, MaxTexts = 80, MaxFx = 700;
     }
 
     static class Palette
@@ -1621,6 +2419,9 @@ namespace ArcaneDrift
         public static readonly Color Haste = Hex(0xB8EEFF);
         public static readonly Color Stunned = Hex(0xB9A2FF);
         public static readonly Color SkillHit = Hex(0x8FE9FF);
+        public static readonly Color PassiveHit = Hex(0xC6F2FF);
+        public static readonly Color Ice = Hex(0xA8E6FF);
+        public static readonly Color Slowed = Hex(0xCFE9D8);
         public static readonly Color Target = Hex(0xFF6B6B);
         public static readonly Color Bolt = Hex(0xE4D8FF);
         public static readonly Color QBolt = Hex(0x6BD5FF);
@@ -1693,16 +2494,18 @@ namespace ArcaneDrift
         public float radius, hp, maxHp, damage, speed;
         public int xp;
         public float contactReady, stun, flash, fade, barrage;
+        public float shurikenReady, laserReady;     // 같은 표창·레이저에 연달아 맞지 않게
+        public float slowUntil, slowFactor, iceUntil;
         public bool IsBoss { get { return rank == Rank.Boss || rank == Rank.BigBoss; } }
     }
 
-    enum ProjKind { Basic, QBolt, EnemyBullet }
+    enum ProjKind { Basic, QBolt, EnemyBullet, Missile }
 
     class Projectile : Pooled
     {
         public ProjKind kind;
         public Vector2 pos, vel;
-        public float speed, radius, damage, life, delay;
+        public float speed, radius, damage, life, delay, trail;
         public Enemy target;
         public int targetSerial, pierceLeft, bouncesLeft;
         public bool evolved;
@@ -1718,8 +2521,8 @@ namespace ArcaneDrift
 
     class Fx : Pooled
     {
-        public Vector2 pos;
-        public float age, life, from, to;
+        public Vector2 pos, vel, size;
+        public float age, life, from, to, drag, spin, rot;
         public Color color;
     }
 
@@ -1729,7 +2532,7 @@ namespace ArcaneDrift
         public string text;
         public Color color;
         public float age;
-        public bool big;
+        public bool big, small;
     }
 
     class Pool<T> where T : Pooled, new()
@@ -1796,9 +2599,125 @@ namespace ArcaneDrift
         public int level;        // 0 = 잠김
         public bool evolved;
         public float cdLeft, cdTotal = 1f;
+        public int stock;        // E 연속 돌진 남은 횟수
 
         public SkillState(int index) { this.index = index; }
     }
+
+    // ==================================================================== 패시브 스킬 정의
+
+    static class Passive
+    {
+        public const int Shuriken = 0, Thunder = 1, Acid = 2, Missile = 3, Frost = 4, Laser = 5, Vortex = 6, Meteor = 7, Count = 8;
+
+        public static readonly string[] Names = { "회전 표창", "낙뢰", "산성 웅덩이", "유도 미사일", "냉기 폭발", "회전 레이저", "블랙홀", "메테오" };
+        public static readonly string[] Short = { "표창", "낙뢰", "산성", "미사일", "냉기", "레이저", "블랙홀", "메테오" };
+        public static readonly string[] EvolveNames = { "칼날 폭풍", "뇌신의 심판", "독성 범람", "융단 폭격", "절대 빙결", "프리즘 레이저", "특이점", "천벌" };
+        public static readonly Color[] Colors =
+        {
+            Palette.Hex(0xBFE3FF), Palette.Hex(0xFFE45C), Palette.Hex(0x59E06A), Palette.Hex(0xFF8A4C),
+            Palette.Hex(0x8FDBFF), Palette.Hex(0xFF4FD8), Palette.Hex(0x9B6BFF), Palette.Hex(0xFF6A2B),
+        };
+        public static readonly string[] What =
+        {
+            "몸 주위를 도는 표창이 닿는 적을 벱니다",
+            "주변의 무작위 적들에게 번개가 떨어집니다",
+            "적이 모인 곳에 산성 웅덩이를 쏟아 계속 피해를 줍니다",
+            "적을 쫓아가 터지는 미사일을 발사합니다",
+            "주변에 냉기를 터뜨려 피해를 주고 적을 느리게 합니다",
+            "몸 주위를 도는 레이저를 잠시 켭니다. 닿는 적은 계속 피해",
+            "적 무리 한가운데에 블랙홀을 열어 끌어당기며 피해를 줍니다",
+            "하늘에서 운석을 떨어뜨려 넓은 범위를 터뜨립니다",
+        };
+        public static readonly string[] EvolveWhat =
+        {
+            "표창 +3개, 궤도가 숨 쉬듯 커졌다 작아집니다\n피해 ×1.5",
+            "번개가 근처 적 3명에게 다시 튑니다\n피해 ×1.5",
+            "웅덩이 크기 ×1.5, 위에 있는 적이 느려집니다\n피해 ×1.5",
+            "미사일 +2발, 폭발 범위 ×1.4\n피해 ×1.5",
+            "맞은 적을 얼리고, 0.35초 뒤 한 번 더 터집니다\n피해 ×1.5",
+            "광선 수 ×2\n피해 ×1.5",
+            "크기 ×1.5, 사라질 때 크게 폭발합니다\n피해 ×1.5",
+            "운석 +1개, 범위 ×1.3, 떨어진 자리가 불탑니다\n피해 ×1.5",
+        };
+
+        // 피해 계수 (× 공격력 × SkillDamageBoost). 장판·레이저는 한 번 틱당 피해
+        public static float Coef(int id, int lv)
+        {
+            switch (id)
+            {
+                case Shuriken: return 0.35f + 0.08f * lv;
+                case Thunder: return 1.0f + 0.25f * lv;
+                case Acid: return 0.22f + 0.05f * lv;
+                case Missile: return 0.9f + 0.2f * lv;
+                case Frost: return 0.8f + 0.2f * lv;
+                case Laser: return 0.28f + 0.06f * lv;
+                case Vortex: return 0.16f + 0.04f * lv;
+                default: return 2.2f + 0.45f * lv;
+            }
+        }
+
+        static readonly float[] BaseCd = { 0f, 2.4f, 3.0f, 1.8f, 4.0f, 5.0f, 6.0f, 4.0f };
+        static readonly float[] CdPerLv = { 0f, 0.15f, 0.2f, 0.1f, 0.3f, 0.3f, 0.4f, 0.25f };
+
+        public static float Cooldown(int id, int lv, float mult)
+        {
+            return Mathf.Max(0.4f, (BaseCd[id] - CdPerLv[id] * lv) * mult);
+        }
+
+        // 카드·Tab 화면에 보여줄 핵심 수치 (증강 보너스 제외)
+        public static string Stats(int id, int lv)
+        {
+            string dmg = "피해: 공격력 × " + (Coef(id, lv) * Tune.SkillDamageBoost).ToString("0.##");
+            string cd = "쿨다운 " + Cooldown(id, lv, 1f).ToString("0.0") + "초";
+            switch (id)
+            {
+                case Shuriken: return "표창 " + (2 + lv / 2) + "개 · 0.4초마다 벰\n" + dmg;
+                case Thunder: return "번개 " + (2 + lv) + "개 · " + cd + "\n" + dmg;
+                case Acid: return "웅덩이 " + (1 + lv / 2) + "개 · 3초 · " + cd + "\n" + dmg + " (0.5초마다)";
+                case Missile: return "미사일 " + (1 + lv / 2) + "발 · " + cd + "\n" + dmg;
+                case Frost: return "범위 " + (Tune.FrostRadius + Tune.FrostRadiusPerLv * lv).ToString("0.0") + " · 50% 감속 · " + cd + "\n" + dmg;
+                case Laser: return "광선 " + (1 + (lv >= 3 ? 1 : 0)) + "줄 · 2.2초 · " + cd + "\n" + dmg + " (0.2초마다)";
+                case Vortex: return "범위 " + (Tune.VortexRadius + Tune.VortexRadiusPerLv * lv).ToString("0.0") + " · 2.6초 · " + cd + "\n" + dmg + " (0.3초마다)";
+                default: return "운석 " + (1 + lv / 2) + "개 · " + cd + "\n" + dmg;
+            }
+        }
+    }
+
+    class PassiveState
+    {
+        public int level;        // 0 = 없음
+        public bool evolved;
+        public float timer;      // 다음 발동까지
+        public float active;     // 레이저가 켜져 있는 남은 시간
+        public float angle;      // 표창·레이저 회전 각도
+    }
+
+    enum HitKind { Basic, Skill, Passive }
+
+    enum ZoneKind { Acid, Fire, Vortex }
+
+    class Zone : Pooled
+    {
+        public ZoneKind kind;
+        public Vector2 pos;
+        public Color color;
+        public float radius, life, duration, tick, tickEvery, damage, slow, pull, collapse, spin;
+    }
+
+    class Falling : Pooled
+    {
+        public Vector2 from, to;
+        public float t, duration, damage, radius;
+        public bool burn;
+    }
+
+    class Delayed
+    {
+        public float t;
+        public System.Action action;
+    }
+
 
     // ==================================================================== 증강
 
@@ -1813,6 +2732,14 @@ namespace ArcaneDrift
         public float explodeOnHit, chainChance, critAftermath, killExplode;
         public bool synergyFinale;
 
+        // 스킬 증강
+        public float skillArea, skillDuration, wRadiusPct;
+        public int skillAmount, eCharges;
+        public bool resonance, qTriple, qGiant, qTrail, wDouble, wPull, eAfterBlast, eGuard;
+        public readonly int[] passiveExtra = new int[Passive.Count];      // 패시브별 개수 +
+        public readonly float[] passiveSize = new float[Passive.Count];   // 패시브별 크기 +%
+        public bool shurikenFast, thunderStun, acidCorrode, missileCluster, frostFreeze, laserPower, vortexCollapse, meteorBurn;
+
         public float SkillCdMult { get { return Mathf.Max(Tune.MinSkillCdMult, 1f - skillCdCut); } }
     }
 
@@ -1824,13 +2751,19 @@ namespace ArcaneDrift
         CritChance, CritMult, Lifesteal, MagnetPct, Armor, SkillCdCut, SkillDmgPct,
         Pierce, Multishot, Ricochet, Echo,
         ExplodeOnHit, Chain, CritAftermath, KillExplode, SynergyFinale,
+        SkillArea, SkillDuration, SkillAmount, Resonance,
+        QTriple, QGiant, QTrail, WDouble, WPull, WRadius, ECharge, EAfterBlast, EGuard,
+        PassiveExtra, PassiveSize,
+        ShurikenFast, ThunderStun, AcidCorrode, MissileCluster, FrostFreeze, LaserPower, VortexCollapse, MeteorBurn,
     }
 
     struct ModEffect
     {
         public readonly ModOp op;
         public readonly float value;
-        public ModEffect(ModOp op, float value) { this.op = op; this.value = value; }
+        public readonly int target;   // PassiveExtra·PassiveSize 가 어느 패시브인지
+        public ModEffect(ModOp op, float value) { this.op = op; this.value = value; target = 0; }
+        public ModEffect(ModOp op, float value, int target) { this.op = op; this.value = value; this.target = target; }
     }
 
     class Augment
@@ -1840,6 +2773,7 @@ namespace ArcaneDrift
         public readonly int maxStacks;
         public readonly List<ModEffect> effects;
         public bool needsAllSkills;
+        public int needsSkill = -1, needsPassive = -1;   // 이 스킬(Q=0, W=1, E=2)·패시브를 가지고 있어야 나온다
 
         public Augment(string id, string name, Rarity rarity, int maxStacks, string desc, params ModEffect[] effects)
         {
@@ -1880,15 +2814,42 @@ namespace ArcaneDrift
                 case ModOp.CritAftermath: m.critAftermath += v; break;
                 case ModOp.KillExplode: m.killExplode += v; break;
                 case ModOp.SynergyFinale: m.synergyFinale = true; break;
+                case ModOp.SkillArea: m.skillArea += v; break;
+                case ModOp.SkillDuration: m.skillDuration += v; break;
+                case ModOp.SkillAmount: m.skillAmount += (int)v; break;
+                case ModOp.Resonance: m.resonance = true; break;
+                case ModOp.QTriple: m.qTriple = true; break;
+                case ModOp.QGiant: m.qGiant = true; break;
+                case ModOp.QTrail: m.qTrail = true; break;
+                case ModOp.WDouble: m.wDouble = true; break;
+                case ModOp.WPull: m.wPull = true; break;
+                case ModOp.WRadius: m.wRadiusPct += v; break;
+                case ModOp.ECharge: m.eCharges += (int)v; break;
+                case ModOp.EAfterBlast: m.eAfterBlast = true; break;
+                case ModOp.EGuard: m.eGuard = true; break;
+                case ModOp.PassiveExtra: m.passiveExtra[fx.target] += (int)v; break;
+                case ModOp.PassiveSize: m.passiveSize[fx.target] += v; break;
+                case ModOp.ShurikenFast: m.shurikenFast = true; break;
+                case ModOp.ThunderStun: m.thunderStun = true; break;
+                case ModOp.AcidCorrode: m.acidCorrode = true; break;
+                case ModOp.MissileCluster: m.missileCluster = true; break;
+                case ModOp.FrostFreeze: m.frostFreeze = true; break;
+                case ModOp.LaserPower: m.laserPower = true; break;
+                case ModOp.VortexCollapse: m.vortexCollapse = true; break;
+                case ModOp.MeteorBurn: m.meteorBurn = true; break;
             }
             return 0f;
         }
     }
 
     // [확인 필요] 원본 AUGMENTS 배열을 확인하지 못해, 인수인계 문서의 이름·등급별 개수(일반 8, 고급 6, 희귀 6, 전설 5)에 맞춰 새로 만든 목록
+    // + 사용자 요청으로 추가한 스킬 증강 33종 (해당 스킬을 가지고 있을 때만 나온다)
     static class Augments
     {
         static ModEffect E(ModOp op, float v) { return new ModEffect(op, v); }
+        static ModEffect E(ModOp op, float v, int target) { return new ModEffect(op, v, target); }
+        static Augment NeedsSkill(int skill, Augment a) { a.needsSkill = skill; return a; }
+        static Augment NeedsPassive(int passive, Augment a) { a.needsPassive = passive; return a; }
 
         public static readonly Augment[] All = Build();
 
@@ -1930,13 +2891,50 @@ namespace ArcaneDrift
                 new Augment("warp", "시간 왜곡", Rarity.Legendary, 1, "스킬 쿨다운 -25%, 스킬 피해 +25%", E(ModOp.SkillCdCut, 0.25f), E(ModOp.SkillDmgPct, 0.25f)),
                 new Augment("immortal", "불멸", Rarity.Legendary, 1, "최대 체력 +60, 초당 체력 회복 +3", E(ModOp.MaxHp, 60), E(ModOp.Regen, 3)),
                 finale,
+                // ---- 스킬 증강: 모든 스킬 ----
+                new Augment("wideArea", "광역화", Rarity.Common, 3, "모든 스킬 범위 +15%", E(ModOp.SkillArea, 0.15f)),
+                new Augment("longCast", "지속 강화", Rarity.Common, 3, "장판·레이저·감속 지속시간 +25%", E(ModOp.SkillDuration, 0.25f)),
+                new Augment("cycle", "순환", Rarity.Common, 4, "모든 스킬 쿨다운 -8%", E(ModOp.SkillCdCut, 0.08f)),
+                new Augment("overload", "마력 과부하", Rarity.Advanced, 4, "모든 스킬 피해 +20%", E(ModOp.SkillDmgPct, 0.2f)),
+                new Augment("multicast", "다중 시전", Rarity.Rare, 2, "Q 볼트·표창·번개·웅덩이·미사일·레이저·운석 개수 +1", E(ModOp.SkillAmount, 1)),
+                new Augment("resonance", "원소 공명", Rarity.Legendary, 1, "패시브 스킬을 3개 이상 가지고 있으면 모든 스킬 피해 +35%", E(ModOp.Resonance, 1)),
+                // ---- 스킬 증강: Q ----
+                NeedsSkill(0, new Augment("qTriple", "삼연발", Rarity.Rare, 1, "Q 아케인 볼트를 부채꼴로 3발 쏩니다", E(ModOp.QTriple, 1))),
+                NeedsSkill(0, new Augment("qGiant", "거대 볼트", Rarity.Advanced, 1, "Q 볼트 크기 +80%, 피해 +25%", E(ModOp.QGiant, 1))),
+                NeedsSkill(0, new Augment("qTrail", "마력 잔류", Rarity.Rare, 1, "Q 볼트가 지나간 길에 작은 폭발이 연달아 터집니다", E(ModOp.QTrail, 1))),
+                // ---- 스킬 증강: W ----
+                NeedsSkill(1, new Augment("wDouble", "이중 파동", Rarity.Rare, 1, "W 파동이 0.4초 뒤 한 번 더 터집니다 (70% 피해)", E(ModOp.WDouble, 1))),
+                NeedsSkill(1, new Augment("wPull", "중력 붕괴", Rarity.Rare, 1, "W가 적을 밀어내지 않고 끌어당깁니다. 피해 +20%", E(ModOp.WPull, 1))),
+                NeedsSkill(1, new Augment("wWide", "충격 확장", Rarity.Advanced, 2, "W 범위 +25%", E(ModOp.WRadius, 0.25f))),
+                // ---- 스킬 증강: E ----
+                NeedsSkill(2, new Augment("eCharge", "연속 돌진", Rarity.Rare, 1, "E를 쿨다운 없이 한 번 더 쓸 수 있습니다 (충전 2회)", E(ModOp.ECharge, 1))),
+                NeedsSkill(2, new Augment("eBlast", "잔상 폭발", Rarity.Rare, 1, "E로 지나간 길이 0.3초 뒤 폭발합니다 (E 피해의 60%)", E(ModOp.EAfterBlast, 1))),
+                NeedsSkill(2, new Augment("eGuard", "무적 돌진", Rarity.Advanced, 1, "E를 쓰고 0.8초 동안 피해를 받지 않습니다", E(ModOp.EGuard, 1))),
+                // ---- 스킬 증강: 패시브 ----
+                NeedsPassive(Passive.Shuriken, new Augment("shurikenMore", "표창 추가", Rarity.Advanced, 2, "회전 표창 +2개", E(ModOp.PassiveExtra, 2, Passive.Shuriken))),
+                NeedsPassive(Passive.Shuriken, new Augment("shurikenFast", "고속 회전", Rarity.Common, 1, "표창 회전 속도 +60%, 피해 +20%", E(ModOp.ShurikenFast, 1))),
+                NeedsPassive(Passive.Shuriken, new Augment("shurikenWide", "넓은 궤도", Rarity.Common, 2, "표창 궤도 +30%", E(ModOp.PassiveSize, 0.3f, Passive.Shuriken))),
+                NeedsPassive(Passive.Thunder, new Augment("thunderMore", "낙뢰 증폭", Rarity.Advanced, 2, "번개 +2개", E(ModOp.PassiveExtra, 2, Passive.Thunder))),
+                NeedsPassive(Passive.Thunder, new Augment("thunderStun", "감전", Rarity.Rare, 1, "번개에 맞은 적이 0.6초 기절합니다", E(ModOp.ThunderStun, 1))),
+                NeedsPassive(Passive.Acid, new Augment("acidFlood", "대량 유출", Rarity.Advanced, 2, "산성 웅덩이 +1개, 크기 +25%", E(ModOp.PassiveExtra, 1, Passive.Acid), E(ModOp.PassiveSize, 0.25f, Passive.Acid))),
+                NeedsPassive(Passive.Acid, new Augment("acidCorrode", "부식", Rarity.Rare, 1, "웅덩이 위의 적이 40% 느려지고, 웅덩이 피해 +30%", E(ModOp.AcidCorrode, 1))),
+                NeedsPassive(Passive.Missile, new Augment("missileMore", "미사일 증설", Rarity.Advanced, 2, "미사일 +2발", E(ModOp.PassiveExtra, 2, Passive.Missile))),
+                NeedsPassive(Passive.Missile, new Augment("missileCluster", "집속탄", Rarity.Rare, 1, "미사일 폭발이 작은 폭발 4개로 퍼집니다", E(ModOp.MissileCluster, 1))),
+                NeedsPassive(Passive.Frost, new Augment("frostWide", "냉기 확산", Rarity.Common, 2, "냉기 폭발 범위 +30%", E(ModOp.PassiveSize, 0.3f, Passive.Frost))),
+                NeedsPassive(Passive.Frost, new Augment("frostFreeze", "절대영도", Rarity.Rare, 1, "냉기에 맞은 적을 1초 동안 얼립니다", E(ModOp.FrostFreeze, 1))),
+                NeedsPassive(Passive.Laser, new Augment("laserMore", "레이저 추가", Rarity.Advanced, 2, "레이저 광선 +1줄", E(ModOp.PassiveExtra, 1, Passive.Laser))),
+                NeedsPassive(Passive.Laser, new Augment("laserPower", "고출력", Rarity.Rare, 1, "레이저 굵기 ×2, 피해 +30%", E(ModOp.LaserPower, 1))),
+                NeedsPassive(Passive.Vortex, new Augment("vortexWide", "사건의 지평선", Rarity.Advanced, 1, "블랙홀 크기 +40%, 당기는 힘 +40%", E(ModOp.PassiveSize, 0.4f, Passive.Vortex))),
+                NeedsPassive(Passive.Vortex, new Augment("vortexCollapse", "붕괴 폭발", Rarity.Rare, 1, "블랙홀이 사라질 때 크게 폭발합니다", E(ModOp.VortexCollapse, 1))),
+                NeedsPassive(Passive.Meteor, new Augment("meteorMore", "유성우", Rarity.Advanced, 2, "운석 +2개", E(ModOp.PassiveExtra, 2, Passive.Meteor))),
+                NeedsPassive(Passive.Meteor, new Augment("meteorBurn", "화염 지대", Rarity.Rare, 1, "운석이 떨어진 자리가 3초 동안 불탑니다", E(ModOp.MeteorBurn, 1))),
             };
         }
     }
 
     // ==================================================================== 카드
 
-    enum CardKind { Augment, SkillUnlock, SkillLevel, SkillEvolve, Heal }
+    enum CardKind { Augment, SkillUnlock, SkillLevel, SkillEvolve, PassiveUnlock, PassiveLevel, PassiveEvolve, Heal }
 
     class Card
     {
@@ -1944,7 +2942,7 @@ namespace ArcaneDrift
 
         public CardKind kind;
         public Augment augment;
-        public int skill;
+        public int skill, passive;
         public string title, tag, desc;
         public Color color;
 
@@ -1985,6 +2983,21 @@ namespace ArcaneDrift
                 "피해 ×1.5\n돌진 중 적을 처치하면 쿨다운 70% 회복",
             };
             return new Card { kind = CardKind.SkillEvolve, skill = i, title = SkillState.Keys[i] + "  " + SkillState.Names[i] + " 진화", tag = "진화", desc = what[i], color = Palette.Legendary };
+        }
+
+        public static Card PassiveUnlock(int id)
+        {
+            return new Card { kind = CardKind.PassiveUnlock, passive = id, title = Passive.Names[id], tag = "새 패시브 스킬 · 자동 발동", desc = Passive.What[id] + "\n\n" + Passive.Stats(id, 1), color = Passive.Colors[id] };
+        }
+
+        public static Card PassiveLevel(int id, int lv)
+        {
+            return new Card { kind = CardKind.PassiveLevel, passive = id, title = Passive.Names[id] + "  Lv " + (lv + 1), tag = "패시브 강화", desc = "Lv " + lv + " → " + (lv + 1) + "\n\n" + Passive.Stats(id, lv + 1), color = Passive.Colors[id] };
+        }
+
+        public static Card PassiveEvolve(int id)
+        {
+            return new Card { kind = CardKind.PassiveEvolve, passive = id, title = Passive.EvolveNames[id], tag = "진화 · " + Passive.Names[id], desc = Passive.EvolveWhat[id], color = Palette.Legendary };
         }
 
         public static Card Heal()
@@ -2086,6 +3099,7 @@ namespace ArcaneDrift
             HeroIdle = MakePixelSprite(Concat(HeroTop, HeroLegsIdle));
             HeroStep = MakePixelSprite(Concat(HeroTop, HeroLegsStep));
             PaintMonsters();
+            PaintSkillArt();
             XpDrop = PaintXpDrop().ToSprite(PixelsPerUnit, new Vector2(0.5f, 0.45f), false);
         }
 
@@ -2522,6 +3536,144 @@ namespace ArcaneDrift
             for (int x = 14; x < 29; x += 3) { c.Set(x, 32, White); c.Set(x + 1, 32, White); c.Set(x + 1, 31, White); }
             c.Outline(Ink);
             return c;
+        }
+
+        // ---- 스킬 효과용 그림 ----
+        public static Sprite Glow { get; private set; }      // 부드럽게 퍼지는 빛 (반짝이·폭발)
+        public static Sprite Pixel { get; private set; }     // 1×1 유닛 사각형 (번개·레이저)
+        public static Sprite Star { get; private set; }      // 눈송이·반짝이
+        public static Sprite Shuriken { get; private set; }
+        public static Sprite Missile { get; private set; }
+        public static Sprite Meteor { get; private set; }
+        public static Sprite Spiral { get; private set; }    // 블랙홀
+        public static Sprite Puddle { get; private set; }    // 산성·불 장판, 그을린 자국 (흰색으로 그려 색을 입힌다)
+
+        static void PaintSkillArt()
+        {
+            Glow = MakeGlow(64);
+            var px = new Texture2D(2, 2, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Clamp };
+            px.SetPixels32(new[] { White, White, White, White });
+            px.Apply();
+            Pixel = Sprite.Create(px, new Rect(0, 0, 2, 2), new Vector2(0.5f, 0.5f), 2f);
+
+            Star = FromRows(new[]
+            {
+                "...W...",
+                "...W...",
+                ".W.W.W.",
+                "WWWWWWW",
+                ".W.W.W.",
+                "...W...",
+                "...W...",
+            }).ToSprite(PixelsPerUnit / 4f, new Vector2(0.5f, 0.5f), false);
+
+            Shuriken = FromRows(new[]
+            {
+                ".....K.....",
+                "....KWK....",
+                "....KLK....",
+                "...KLLLK...",
+                ".KKKLMLKKK.",
+                "KWLLMOMLLWK",
+                ".KKKLMLKKK.",
+                "...KLLLK...",
+                "....KLK....",
+                "....KWK....",
+                ".....K.....",
+            }).ToSprite(PixelsPerUnit, new Vector2(0.5f, 0.5f), false);
+
+            Missile = FromRows(new[]
+            {
+                "FF.........",
+                "KFKKKKKK...",
+                "KKWWWWWWRK.",
+                "..LWWWWWRRK",
+                "KKLLLLLLRK.",
+                "KFKKKKKK...",
+                "FF.........",
+            }).ToSprite(PixelsPerUnit, new Vector2(0.5f, 0.5f), false);
+
+            var rock = new PixelCanvas(12, 12);
+            rock.Ellipse(6f, 6f, 5f, 4.6f, C(0x6B4A3A));
+            rock.Shade(C(0x4A3128), (x, y) => x + y >= 13);
+            rock.Ellipse(4.5f, 4.2f, 1.6f, 1.1f, C(0x9A7058));
+            rock.Set(6, 6, C(0xFF9A3C)); rock.Set(7, 7, C(0xFF9A3C)); rock.Set(5, 8, C(0xFFD166)); rock.Set(8, 5, C(0xFF9A3C));
+            rock.Outline(Ink);
+            Meteor = rock.ToSprite(PixelsPerUnit, new Vector2(0.5f, 0.5f), false);
+
+            Spiral = MakeSpiral(48);
+            Puddle = MakePuddle(24);
+        }
+
+        static PixelCanvas FromRows(string[] rows)
+        {
+            var c = new PixelCanvas(rows[0].Length, rows.Length);
+            for (int y = 0; y < rows.Length; y++)
+                for (int x = 0; x < rows[y].Length; x++)
+                {
+                    switch (rows[y][x])
+                    {
+                        case 'K': c.Set(x, y, Ink); break;
+                        case 'W': c.Set(x, y, White); break;
+                        case 'L': c.Set(x, y, C(0xC9D3E0)); break;   // 밝은 강철
+                        case 'M': c.Set(x, y, C(0x8A96A8)); break;   // 어두운 강철
+                        case 'O': c.Set(x, y, C(0x2A3140)); break;   // 표창 가운데 구멍
+                        case 'R': c.Set(x, y, C(0xE5484D)); break;   // 미사일 머리
+                        case 'F': c.Set(x, y, C(0xC0392B)); break;   // 미사일 날개
+                    }
+                }
+            return c;
+        }
+
+        // 가운데가 밝고 가장자리로 갈수록 투명해지는 흰 빛
+        static Sprite MakeGlow(int px)
+        {
+            var tex = new Texture2D(px, px, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            var pixels = new Color32[px * px];
+            float c = (px - 1) / 2f, r = px / 2f;
+            for (int y = 0; y < px; y++)
+                for (int x = 0; x < px; x++)
+                {
+                    float d = Mathf.Sqrt((x - c) * (x - c) + (y - c) * (y - c)) / r;
+                    float a = Mathf.Clamp01(1f - d);
+                    pixels[y * px + x] = new Color32(255, 255, 255, (byte)(a * a * 255));
+                }
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, px, px), new Vector2(0.5f, 0.5f), px);
+        }
+
+        // 블랙홀: 세 갈래 소용돌이 팔
+        static Sprite MakeSpiral(int px)
+        {
+            var c = new PixelCanvas(px, px);
+            float mid = px / 2f, r = px / 2f - 1;
+            for (int y = 0; y < px; y++)
+                for (int x = 0; x < px; x++)
+                {
+                    float dx = x + 0.5f - mid, dy = y + 0.5f - mid;
+                    float d = Mathf.Sqrt(dx * dx + dy * dy) / r;
+                    if (d > 1f) continue;
+                    float arm = Mathf.Sin(3f * Mathf.Atan2(dy, dx) + d * 9f);
+                    if (d < 0.18f) c.Set(x, y, new Color32(20, 10, 40, 255));            // 가운데 검은 구멍
+                    else if (arm > 0.35f) c.Set(x, y, new Color32(255, 255, 255, (byte)(255 * (1f - d * 0.6f))));
+                    else if (arm > -0.2f) c.Set(x, y, new Color32(160, 150, 190, (byte)(150 * (1f - d))));
+                }
+            return c.ToSprite(px, new Vector2(0.5f, 0.5f), false);
+        }
+
+        // 웅덩이: 동그라미 몇 개를 겹친 얼룩 + 밝은 테두리
+        static Sprite MakePuddle(int px)
+        {
+            var c = new PixelCanvas(px, px);
+            Color32 body = new Color32(220, 220, 220, 220), rim = new Color32(255, 255, 255, 255);
+            c.Ellipse(12f, 12.5f, 9f, 8f, body);
+            c.Ellipse(7f, 9f, 5f, 4.5f, body);
+            c.Ellipse(17f, 15f, 5.5f, 5f, body);
+            c.Ellipse(15f, 7f, 4.5f, 4f, body);
+            c.Outline(rim);
+            c.Set(9, 9, rim); c.Set(10, 9, rim); c.Set(15, 14, rim);
+            return c.ToSprite(px, new Vector2(0.5f, 0.5f), false);
         }
 
         // 경험치: 실험 혈청 방울 (흰색으로 그리고 SpriteRenderer.color 로 색을 입힌다)
