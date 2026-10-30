@@ -1389,7 +1389,7 @@ namespace ArcaneDrift
         public const float BoltSpeed = 5.6f;
         public static float AttackLock(float aspd) { return Mathf.Min(0.22f, 0.4f / aspd); }
 
-        public const float XpMagnet = 1.4f;
+        public const float XpMagnet = 3.5f;   // 사용자 요청: 이 거리 안의 경험치는 알아서 끌려온다. 평타 사거리(2.9)보다 넓게 (원본 1.4)
         public const float XpPickup = 0.34f;
         // 원본 곡선 round(10 + lv×7 + lv²×0.6) 에 XpRequirement 를 곱한다 (사용자 요청: 증강을 더 자주)
         public const float XpRequirement = 0.6f;
