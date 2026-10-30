@@ -86,7 +86,9 @@ namespace ArcaneDrift
         {
             get
             {
-                float baseSpeed = Tune.PlayerSpeedMatchesMonsters ? EnemyKind.Grunt.speed * Tune.SpeedScale(elapsed) : Tune.PlayerSpeed;
+                float baseSpeed = Tune.PlayerSpeedVsMonster > 0
+                    ? EnemyKind.Grunt.speed * Tune.SpeedScale(elapsed) * Tune.PlayerSpeedVsMonster
+                    : Tune.PlayerSpeed;
                 return baseSpeed * (1 + mods.movePct);
             }
         }
@@ -104,7 +106,7 @@ namespace ArcaneDrift
 
             Art.Init();
             cam = SetupCamera();
-            grid = Art.CreateGrid(transform, 1f, 40f, Palette.Ground, Palette.GridLine);
+            grid = Art.CreateFloor(transform);
 
             // 플레이어: 그림자 + 도트 캐릭터. 맞는 판정은 그림과 상관없이 반지름 PlayerRadius 원이다
             playerTf = new GameObject("Player").transform;
@@ -227,7 +229,9 @@ namespace ArcaneDrift
         void LateUpdate()
         {
             cam.transform.position = new Vector3(ppos.x, ppos.y, -10f);
-            grid.position = new Vector3(Mathf.Round(ppos.x), Mathf.Round(ppos.y), 0f);
+            // 바닥 무늬 한 장(FloorUnits) 단위로만 옮겨서, 무늬가 바닥에 고정된 것처럼 보이게 한다
+            float period = Art.FloorUnits;
+            grid.position = new Vector3(Mathf.Round(ppos.x / period) * period, Mathf.Round(ppos.y / period) * period, 0f);
         }
 
         void Step(float dt)
@@ -554,6 +558,8 @@ namespace ArcaneDrift
             e.speed = kind.speed * Tune.SpeedScale(t) * (elite ? Tune.EliteSpeed : 1f);
             e.xp = kind.xp * (elite ? Tune.EliteXp : 1);
             e.color = elite ? Palette.Elite : kind.color;
+            e.look = elite ? kind.look + Art.EliteOffset : kind.look;
+            e.scale = elite ? Tune.EliteRadius : 1f;
             InitEnemy(e, elite ? 6 : 5);
         }
 
@@ -568,6 +574,8 @@ namespace ArcaneDrift
             e.speed = big ? Tune.BigBossSpeed : Tune.BossSpeed;
             e.xp = big ? Tune.BigBossXp : Tune.BossXp;
             e.color = big ? Palette.BigBoss : Palette.Boss;
+            e.look = big ? Art.LookMutant : Art.LookGoggle;
+            e.scale = 1f;
             InitEnemy(e, 7);
         }
 
@@ -580,9 +588,10 @@ namespace ArcaneDrift
             e.stun = e.flash = e.fade = 0f;
             e.contactReady = 0f;
             e.barrage = 1f;
-            e.sr.sprite = Art.Circle;
+            e.sr.sprite = Art.Monster[e.look];
             e.sr.sortingOrder = order;
-            e.sr.color = e.color;
+            e.sr.color = Color.white;
+            e.sr.flipX = false;
             e.tf.position = new Vector3(e.pos.x, e.pos.y, 0f);
             e.tf.localScale = Vector3.zero;
         }
@@ -634,8 +643,13 @@ namespace ArcaneDrift
                 e.fade = Mathf.Min(1f, e.fade + dt * 4f);
                 e.flash -= dt;
                 e.tf.position = new Vector3(e.pos.x, e.pos.y, 0f);
-                e.tf.localScale = Vector3.one * (e.radius * 2f * e.fade);
-                e.sr.color = e.flash > 0 ? Color.white : e.stun > 0 ? Color.Lerp(e.color, Palette.Void, 0.5f) : e.color;
+                // 말랑말랑하게 출렁이기 (적마다 박자가 다르게)
+                float wobble = Mathf.Sin(elapsed * (e.IsBoss ? 5f : 9f) + e.serial * 1.3f);
+                float size = e.scale * e.fade;
+                e.tf.localScale = new Vector3(size * (1f - 0.05f * wobble), size * (1f + 0.07f * wobble), 1f);
+                e.sr.flipX = ppos.x < e.pos.x;   // 그림은 오른쪽을 보고 있다. 플레이어 쪽을 보게
+                e.sr.sprite = e.flash > 0 ? Art.MonsterFlash[e.look] : Art.Monster[e.look];
+                e.sr.color = e.stun > 0 ? Palette.Stunned : Color.white;
             }
         }
 
@@ -949,7 +963,7 @@ namespace ArcaneDrift
             o.value = value;
             o.magnet = false;
             o.speed = 0f;
-            o.sr.sprite = Art.Circle;
+            o.sr.sprite = Art.XpDrop;
             o.sr.color = value >= 100 ? Palette.Legendary : Palette.Xp;
             o.tf.position = new Vector3(o.pos.x, o.pos.y, 0f);
             ScaleOrb(o);
@@ -957,7 +971,7 @@ namespace ArcaneDrift
 
         static void ScaleOrb(XpOrb o)
         {
-            o.tf.localScale = Vector3.one * Mathf.Clamp(0.07f + Mathf.Sqrt(o.value) * 0.02f, 0.09f, 0.4f);
+            o.tf.localScale = Vector3.one * Mathf.Clamp(0.8f + Mathf.Sqrt(o.value) * 0.08f, 0.9f, 2.2f);
         }
 
         void UpdateOrbs(float dt)
@@ -1352,10 +1366,10 @@ namespace ArcaneDrift
         public const float CameraSize = 4.5f;
 
         public const float PlayerRadius = 0.15f;
-        public const float PlayerSpeed = 2.5f;   // 원본 이속. 아래 PlayerSpeedMatchesMonsters 가 true 면 쓰지 않는다
-        // 사용자 요청: 플레이어 이속 = 기본 몬스터(grunt) 이속. 몬스터 이속이 시간에 따라 오르면 같이 오른다.
-        // false 로 바꾸면 원본 2.5 로 돌아간다
-        public const bool PlayerSpeedMatchesMonsters = true;
+        public const float PlayerSpeed = 2.5f;   // 원본 이속. 아래 PlayerSpeedVsMonster 가 0 일 때만 쓴다
+        // 사용자 요청: 플레이어 이속 = 기본 몬스터(grunt) 이속 × 1.5. 몬스터 이속이 시간에 따라 오르면 같이 오른다.
+        // 0 으로 바꾸면 원본 2.5 로 돌아간다
+        public const float PlayerSpeedVsMonster = 1.5f;
         public const float PlayerHp = 100f;
         public const float PlayerDamage = 10f;
         public const float PlayerAspd = 1.1f;
@@ -1446,12 +1460,12 @@ namespace ArcaneDrift
         }
         public static Color Fade(Color c, float a) { return new Color(c.r, c.g, c.b, a); }
 
-        public static readonly Color Ground = Hex(0x1A1626);
-        public static readonly Color GridLine = Hex(0x2A243D);
+        public static readonly Color Ground = Hex(0x131A20);
         public static readonly Color Player = Hex(0xC9B6FF);
         public static readonly Color Marker = Hex(0x6BD5FF);
         public static readonly Color Muzzle = Hex(0xE4C8FF);
         public static readonly Color Haste = Hex(0xB8EEFF);
+        public static readonly Color Stunned = Hex(0xB9A2FF);
         public static readonly Color Target = Hex(0xFF6B6B);
         public static readonly Color Bolt = Hex(0xE4D8FF);
         public static readonly Color QBolt = Hex(0x6BD5FF);
@@ -1490,16 +1504,16 @@ namespace ArcaneDrift
         public readonly string key;
         public readonly Color color;
         public readonly float radius, hp, damage, speed;
-        public readonly int xp;
+        public readonly int xp, look;   // look: Art.Monster 의 그림 번호
 
-        EnemyKind(string key, Color color, float radius, float hp, float damage, float speed, int xp)
+        EnemyKind(string key, Color color, float radius, float hp, float damage, float speed, int xp, int look)
         {
-            this.key = key; this.color = color; this.radius = radius; this.hp = hp; this.damage = damage; this.speed = speed; this.xp = xp;
+            this.key = key; this.color = color; this.radius = radius; this.hp = hp; this.damage = damage; this.speed = speed; this.xp = xp; this.look = look;
         }
 
-        public static readonly EnemyKind Grunt = new EnemyKind("grunt", Palette.Hex(0x7A4FB0), 0.13f, 16f, 6f, 0.95f, 2);
-        public static readonly EnemyKind Runner = new EnemyKind("runner", Palette.Hex(0x3FA789), 0.10f, 10f, 4f, 1.65f, 2);
-        public static readonly EnemyKind Brute = new EnemyKind("brute", Palette.Hex(0xB0554F), 0.19f, 44f, 12f, 0.70f, 5);
+        public static readonly EnemyKind Grunt = new EnemyKind("grunt", Palette.Hex(0x7A4FB0), 0.13f, 16f, 6f, 0.95f, 2, Art.LookSlime);
+        public static readonly EnemyKind Runner = new EnemyKind("runner", Palette.Hex(0x3FA789), 0.10f, 10f, 4f, 1.65f, 2, Art.LookFlask);
+        public static readonly EnemyKind Brute = new EnemyKind("brute", Palette.Hex(0xB0554F), 0.19f, 44f, 12f, 0.70f, 5, Art.LookBrute);
     }
 
     // ==================================================================== 풀링되는 것들
@@ -1517,7 +1531,9 @@ namespace ArcaneDrift
     {
         public int serial;   // 풀에서 다시 쓰일 때마다 바뀐다. 예전 대상을 쫓던 투사체가 새 적을 쫓지 않게 하려고
         public Rank rank;
-        public Color color;
+        public Color color;       // 체력바·터지는 효과 색
+        public int look;          // Art.Monster 그림 번호
+        public float scale;       // 그림 배율 (엘리트는 크게)
         public Vector2 pos, knock;
         public float radius, hp, maxHp, damage, speed;
         public int xp;
@@ -1913,7 +1929,12 @@ namespace ArcaneDrift
             Ring = MakeDisc(128, 0.86f);
             HeroIdle = MakePixelSprite(Concat(HeroTop, HeroLegsIdle));
             HeroStep = MakePixelSprite(Concat(HeroTop, HeroLegsStep));
+            PaintMonsters();
+            XpDrop = PaintXpDrop().ToSprite(PixelsPerUnit, new Vector2(0.5f, 0.45f), false);
         }
+
+        // 도트 그림은 모두 1유닛 = 32픽셀 (플레이어와 같은 밀도)
+        public const float PixelsPerUnit = 32f;
 
         // ---- 플레이어 캐릭터: 16×20 도트, 오른쪽을 보고 있다 (탕탕특공대 느낌의 2등신, 직접 그린 그림) ----
         const int HeroW = 16, HeroH = 20;
@@ -2021,15 +2042,6 @@ namespace ArcaneDrift
             return sr.transform;
         }
 
-        // extent×extent 유닛 크기로 깔리는 격자 배경
-        public static Transform CreateGrid(Transform parent, float cell, float extent, Color ground, Color line)
-        {
-            var sr = CreateSprite("Grid", parent, MakeGridCell(cell, ground, line), Color.white, -10);
-            sr.drawMode = SpriteDrawMode.Tiled;
-            sr.size = new Vector2(extent, extent);
-            return sr.transform;
-        }
-
         // 지름 1유닛짜리 흰 원(inner = 0) 또는 고리(inner = 구멍 반지름 비율)
         static Sprite MakeDisc(int px, float inner)
         {
@@ -2049,19 +2061,394 @@ namespace ArcaneDrift
             return Sprite.Create(tex, new Rect(0, 0, px, px), new Vector2(0.5f, 0.5f), px);
         }
 
-        // 한 칸(cell 유닛)짜리 그림: 배경색 위에 왼쪽·아래쪽 테두리 선
-        static Sprite MakeGridCell(float cell, Color ground, Color line)
+        // ---- 실험실 바닥 (직접 그린 그림) ----
+        // FloorUnits × FloorUnits 유닛짜리 무늬 한 장을 이어 붙인다. 무늬 안의 모든 것은 가장자리에서 반대편으로 이어져서 이음매가 없다.
+        public const int FloorUnits = 16;
+        const int TilePx = 32;
+
+        public static Transform CreateFloor(Transform parent)
         {
-            const int px = 64;
-            var tex = new Texture2D(px, px, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Repeat };
-            var pixels = new Color[px * px];
-            for (int y = 0; y < px; y++)
-                for (int x = 0; x < px; x++)
-                    pixels[y * px + x] = (x < 2 || y < 2) ? line : ground;
-            tex.SetPixels(pixels);
+            var sr = CreateSprite("LabFloor", parent, PaintLabFloor(), Color.white, -10);
+            sr.drawMode = SpriteDrawMode.Tiled;
+            sr.size = new Vector2(FloorUnits * 3, FloorUnits * 3);
+            return sr.transform;
+        }
+
+        static Sprite PaintLabFloor()
+        {
+            int n = FloorUnits * TilePx;
+            var f = new Color32[n * n];
+            var rng = new System.Random(20261030);   // 항상 같은 바닥이 나오게 고정된 씨앗
+
+            // 1) 바닥 타일: 대부분 평범한 타일, 가끔 철망·어두운 패널
+            for (int ty = 0; ty < FloorUnits; ty++)
+                for (int tx = 0; tx < FloorUnits; tx++)
+                {
+                    int roll = rng.Next(100);
+                    bool grate = roll < 8, panel = roll >= 8 && roll < 14;
+                    Color32 tile = grate ? C(0x18222A) : panel ? C(0x1D2A33) : Vary(C(0x23313B), rng.Next(-3, 4));
+                    for (int y = 0; y < TilePx; y++)
+                        for (int x = 0; x < TilePx; x++)
+                        {
+                            Color32 c = tile;
+                            if (x == 0 || y == 0) c = C(0x111920);                                   // 줄눈
+                            else if (x == 1 || y == TilePx - 1) c = Vary(tile, 9);                      // 빛 받는 모서리
+                            else if (x == TilePx - 1 || y == 1) c = Vary(tile, -7);                     // 그림자 모서리
+                            else if (grate && x >= 5 && x < 27 && y >= 5 && y < 27) c = y % 4 < 2 ? C(0x0C1216) : C(0x2B3843);
+                            else if (grate && (x == 3 || x == 28) && (y == 3 || y == 28)) c = C(0x56687A); // 나사
+                            Put(f, n, tx * TilePx + x, ty * TilePx + y, c);
+                        }
+                }
+
+            // 2) 바닥에 칠한 통로 선 (무늬 끝까지 이어진다)
+            for (int i = 0; i < n; i++)
+                for (int k = 0; k < 3; k++)
+                {
+                    Blend(f, n, i, 5 * TilePx + 14 + k, C(0x6F8596), 0.28f);
+                    Blend(f, n, 11 * TilePx + 14 + k, i, C(0x6F8596), 0.28f);
+                }
+
+            // 3) 노랑·검정 경고 줄무늬
+            for (int s = 0; s < 4; s++)
+            {
+                int x0 = rng.Next(FloorUnits) * TilePx, y0 = rng.Next(FloorUnits) * TilePx + 12;
+                bool horizontal = s % 2 == 0;
+                int len = TilePx * rng.Next(2, 5);
+                for (int a = 0; a < len; a++)
+                    for (int b = 0; b < 8; b++)
+                    {
+                        bool yellow = ((a + b) / 5) % 2 == 0;
+                        Color32 c = b == 0 || b == 7 ? C(0x0E0E10) : yellow ? C(0xE2B33A) : C(0x1B1B1F);
+                        if (horizontal) Put(f, n, x0 + a, y0 + b, c); else Put(f, n, y0 + b, x0 + a, c);
+                    }
+            }
+
+            // 4) 둥근 배수구
+            for (int d = 0; d < 3; d++)
+            {
+                int cx = rng.Next(FloorUnits) * TilePx + TilePx / 2, cy = rng.Next(FloorUnits) * TilePx + TilePx / 2;
+                for (int y = -10; y <= 10; y++)
+                    for (int x = -10; x <= 10; x++)
+                    {
+                        float r = Mathf.Sqrt(x * x + y * y);
+                        if (r > 10) continue;
+                        Color32 c = r > 8.5f ? C(0x495868) : r > 7.5f ? C(0x0A0F12) : (x + 20) % 3 == 0 ? C(0x3A4856) : C(0x0A0F12);
+                        Put(f, n, cx + x, cy + y, c);
+                    }
+            }
+
+            // 5) 바닥 위를 지나가는 전선 두 가닥 (사인 곡선, 주기가 무늬 크기와 맞아서 이어진다)
+            for (int cable = 0; cable < 2; cable++)
+            {
+                int y0 = rng.Next(n), waves = 2 + cable;
+                float amp = 20 + cable * 14;
+                Color32 dark = cable == 0 ? C(0x24407A) : C(0x7A2E36), light = cable == 0 ? C(0x4C74C2) : C(0xC0505A);
+                for (int x = 0; x < n; x++)
+                {
+                    int y = y0 + Mathf.RoundToInt(amp * Mathf.Sin(x * Mathf.PI * 2f * waves / n));
+                    Put(f, n, x, y - 1, C(0x0B0F12));
+                    Put(f, n, x, y, dark);
+                    Put(f, n, x, y + 1, light);
+                    Put(f, n, x, y + 2, dark);
+                }
+            }
+
+            // 6) 쏟아진 초록 실험액 웅덩이
+            for (int p = 0; p < 6; p++)
+            {
+                int cx = rng.Next(n), cy = rng.Next(n), blobs = rng.Next(3, 6);
+                var mask = new bool[n * n];
+                for (int b = 0; b < blobs; b++)
+                {
+                    int bx = cx + rng.Next(-16, 17), by = cy + rng.Next(-10, 11), r = rng.Next(4, 11);
+                    for (int y = -r; y <= r; y++)
+                        for (int x = -r; x <= r; x++)
+                            if (x * x + y * y <= r * r) mask[Wrap(by + y, n) * n + Wrap(bx + x, n)] = true;
+                }
+                for (int i = 0; i < mask.Length; i++)
+                    if (mask[i]) Blend(f, n, i % n, i / n, C(0x2FC46C), 0.5f);
+                for (int g = 0; g < 4; g++) Put(f, n, cx + rng.Next(-8, 9), cy + rng.Next(-5, 6), C(0x8CF0B0));   // 반짝이
+            }
+
+            // 7) 금 간 자국
+            for (int k = 0; k < 7; k++)
+            {
+                int x = rng.Next(n), y = rng.Next(n), steps = rng.Next(16, 40);
+                for (int i = 0; i < steps; i++)
+                {
+                    Put(f, n, x, y, C(0x0E1418));
+                    x += rng.Next(2) == 0 ? 1 : 0;
+                    y += rng.Next(-1, 2);
+                }
+            }
+
+            var tex = new Texture2D(n, n, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Repeat };
+            tex.SetPixels32(f);
             tex.Apply();
-            // Tiled 그리기 모드는 Full Rect 메시가 필요하다
-            return Sprite.Create(tex, new Rect(0, 0, px, px), new Vector2(0.5f, 0.5f), px / cell, 0, SpriteMeshType.FullRect);
+            return Sprite.Create(tex, new Rect(0, 0, n, n), new Vector2(0.5f, 0.5f), TilePx, 0, SpriteMeshType.FullRect);
+        }
+
+        static int Wrap(int v, int n) { return ((v % n) + n) % n; }
+        static void Put(Color32[] f, int n, int x, int y, Color32 c) { f[Wrap(y, n) * n + Wrap(x, n)] = c; }
+
+        static void Blend(Color32[] f, int n, int x, int y, Color32 c, float a)
+        {
+            int i = Wrap(y, n) * n + Wrap(x, n);
+            Color32 o = f[i];
+            f[i] = new Color32((byte)(o.r + (c.r - o.r) * a), (byte)(o.g + (c.g - o.g) * a), (byte)(o.b + (c.b - o.b) * a), 255);
+        }
+
+        static Color32 Vary(Color32 c, int d)
+        {
+            return new Color32((byte)Mathf.Clamp(c.r + d, 0, 255), (byte)Mathf.Clamp(c.g + d, 0, 255), (byte)Mathf.Clamp(c.b + d, 0, 255), c.a);
+        }
+
+        public static Color32 C(int rgb)
+        {
+            return new Color32((byte)((rgb >> 16) & 0xFF), (byte)((rgb >> 8) & 0xFF), (byte)(rgb & 0xFF), 255);
+        }
+
+        // ---- 몬스터: 실험실에서 탈출한 귀여운 실험체들 (직접 그린 그림). 모두 오른쪽을 보고 있다 ----
+        public const int LookSlime = 0, LookFlask = 1, LookBrute = 2, LookGoggle = 3, LookMutant = 4;
+        public const int EliteOffset = 5;   // 5~7: 황금 엘리트 버전 (슬라임·플라스크·덩치)
+
+        public static Sprite[] Monster { get; private set; }
+        public static Sprite[] MonsterFlash { get; private set; }   // 맞았을 때 번쩍이는 흰 실루엣
+        public static Sprite XpDrop { get; private set; }
+
+        static readonly Color32 Ink = new Color32(27, 21, 48, 255);
+        static readonly Color32 White = new Color32(255, 255, 255, 255);
+
+        struct Tone
+        {
+            public Color32 body, shade, light;
+            public Tone(int body, int shade, int light) { this.body = C(body); this.shade = C(shade); this.light = C(light); }
+        }
+
+        static readonly Tone Gold = new Tone(0xF0B429, 0xC08410, 0xFFE38A);
+
+        static void PaintMonsters()
+        {
+            var canvases = new[]
+            {
+                PaintSlime(new Tone(0x8A5CC8, 0x6A3FA8, 0xC2A2F2)),
+                PaintFlask(new Tone(0x3FC7A0, 0x2A9A7A, 0xA8F5DD)),
+                PaintBrute(new Tone(0xC0604F, 0x93422F, 0xE89A84)),
+                PaintGoggleSlime(),
+                PaintMutant(),
+                PaintSlime(Gold),
+                PaintFlask(Gold),
+                PaintBrute(Gold),
+            };
+            Monster = new Sprite[canvases.Length];
+            MonsterFlash = new Sprite[canvases.Length];
+            for (int i = 0; i < canvases.Length; i++)
+            {
+                Monster[i] = canvases[i].ToSprite(PixelsPerUnit, new Vector2(0.5f, 0.45f), false);
+                MonsterFlash[i] = canvases[i].ToSprite(PixelsPerUnit, new Vector2(0.5f, 0.45f), true);
+            }
+        }
+
+        // 눈: 흰자에 오른쪽을 보는 눈동자
+        static void Eye(PixelCanvas c, int x, int y, int size)
+        {
+            c.Rect(x, y, size, size, White);
+            if (size <= 2) c.Rect(x + size - 1, y, 1, size, Ink);
+            else { c.Rect(x + 1, y + 1, size - 1, size - 1, Ink); c.Set(x + 1, y + 1, White); }
+        }
+
+        // 일반 몬스터: 보라 슬라임 (13×12)
+        static PixelCanvas PaintSlime(Tone t)
+        {
+            var c = new PixelCanvas(13, 12);
+            c.Ellipse(6.5f, 7.6f, 5.6f, 3.6f, t.body);
+            c.Ellipse(6.5f, 5.2f, 4.4f, 4.0f, t.body);
+            c.Shade(t.shade, (x, y) => y >= 9);
+            c.Ellipse(4.3f, 3.6f, 1.3f, 1.0f, t.light);
+            Eye(c, 6, 5, 2);
+            Eye(c, 9, 5, 2);
+            c.Set(8, 8, Ink);
+            c.Set(9, 8, Ink);
+            c.Outline(Ink);
+            return c;
+        }
+
+        // 빠른 몬스터: 다리 달린 플라스크 (11×13), 액체 색이 몸 색
+        static PixelCanvas PaintFlask(Tone t)
+        {
+            var c = new PixelCanvas(11, 13);
+            Color32 glass = C(0xD8EEF5), rim = C(0xA9CBD6);
+            c.Rect(4, 1, 3, 4, glass);
+            c.Rect(3, 1, 5, 1, rim);
+            for (int y = 5; y <= 10; y++)
+            {
+                float half = 1.6f + (y - 5) * 0.65f;
+                for (int x = 0; x < 11; x++)
+                    if (Mathf.Abs(x + 0.5f - 5.5f) <= half) c.Set(x, y, glass);
+            }
+            c.Shade(t.body, (x, y) => y >= 7);
+            c.Shade(t.shade, (x, y) => y == 10);
+            c.Set(5, 3, t.light);
+            c.Set(3, 9, t.light);
+            Eye(c, 4, 7, 2);
+            Eye(c, 7, 7, 2);
+            c.Set(3, 11, Ink);
+            c.Set(7, 11, Ink);
+            c.Outline(Ink);
+            return c;
+        }
+
+        // 덩치 몬스터: 뿔 달린 고기 덩어리 (16×16)
+        static PixelCanvas PaintBrute(Tone t)
+        {
+            var c = new PixelCanvas(16, 16);
+            Color32 horn = C(0xF2E2C0);
+            c.Ellipse(8f, 9.2f, 7.0f, 5.8f, t.body);
+            c.Rect(3, 2, 2, 3, horn); c.Set(3, 1, horn);
+            c.Rect(11, 2, 2, 3, horn); c.Set(12, 1, horn);
+            c.Shade(t.shade, (x, y) => y >= 12);
+            c.Ellipse(5f, 6.5f, 1.6f, 1.0f, t.light);
+            Eye(c, 7, 7, 2);
+            Eye(c, 11, 7, 2);
+            c.Set(6, 6, Ink); c.Set(7, 6, Ink);     // 화난 눈썹
+            c.Set(12, 6, Ink); c.Set(13, 6, Ink);
+            c.Rect(7, 11, 6, 2, Ink);               // 입
+            c.Set(8, 11, White); c.Set(11, 11, White);
+            c.Outline(Ink);
+            return c;
+        }
+
+        // 보스: 고글 쓴 분홍 슬라임 (28×26)
+        static PixelCanvas PaintGoggleSlime()
+        {
+            var c = new PixelCanvas(28, 26);
+            Color32 body = C(0xE0508C), shade = C(0xB23A6C), light = C(0xFF9CC4);
+            Color32 rim = C(0x9AA3B5), lens = C(0x6BD5FF), strap = C(0x3A3352);
+            c.Ellipse(14f, 16.5f, 12.6f, 8.4f, body);
+            c.Ellipse(14f, 11f, 9.5f, 8.5f, body);
+            c.Shade(shade, (x, y) => y >= 21);
+            c.Ellipse(8.5f, 5.5f, 2.4f, 1.5f, light);
+            c.Shade(strap, (x, y) => y == 10 || y == 11);
+            c.Ellipse(11f, 11f, 3.6f, 3.6f, rim);
+            c.Ellipse(19f, 11f, 3.6f, 3.6f, rim);
+            c.Ellipse(11f, 11f, 2.5f, 2.5f, lens);
+            c.Ellipse(19f, 11f, 2.5f, 2.5f, lens);
+            c.Rect(11, 11, 2, 2, Ink); c.Rect(19, 11, 2, 2, Ink);
+            c.Set(10, 10, White); c.Set(18, 10, White);
+            c.Set(11, 17, Ink); c.Rect(12, 18, 7, 2, Ink); c.Set(19, 17, Ink);   // 웃는 입
+            c.Rect(14, 19, 3, 1, C(0xFF7AA8));
+            c.Outline(Ink);
+            return c;
+        }
+
+        // 대형 보스: 뇌가 든 유리 돔을 쓴 주황 돌연변이 (42×38)
+        static PixelCanvas PaintMutant()
+        {
+            var c = new PixelCanvas(42, 38);
+            Color32 body = C(0xFF7A3D), shade = C(0xD2552A), light = C(0xFFB27E), spot = C(0xE0662F);
+            Color32 glass = new Color32(207, 232, 240, 210), brain = C(0xFF9FC0), brainLine = C(0xD9668C), rim = C(0x7D8797);
+            c.Ellipse(21f, 25f, 19.5f, 11.6f, body);
+            c.Ellipse(21f, 19f, 14f, 10f, body);
+            c.Ellipse(21f, 10.5f, 9f, 8.6f, glass);
+            c.Ellipse(21f, 12f, 6.5f, 4.8f, brain);
+            c.Set(18, 10, brainLine); c.Set(19, 11, brainLine); c.Set(21, 9, brainLine); c.Set(22, 10, brainLine);
+            c.Set(24, 12, brainLine); c.Set(17, 13, brainLine); c.Set(21, 14, brainLine);
+            c.Rect(15, 4, 1, 4, White); c.Rect(16, 3, 1, 2, White);   // 유리 반사광
+            c.Rect(12, 18, 18, 2, rim);
+            c.Shade(shade, (x, y) => y >= 33);
+            c.Ellipse(8f, 27f, 2f, 1.5f, spot); c.Ellipse(34f, 28f, 2.4f, 1.6f, spot); c.Ellipse(30f, 34f, 1.6f, 1.1f, spot);
+            c.Ellipse(9f, 22f, 2.2f, 1.2f, light);
+            Eye(c, 12, 22, 3);
+            Eye(c, 19, 21, 3);
+            Eye(c, 26, 22, 3);
+            c.Rect(12, 28, 18, 5, Ink);
+            for (int x = 13; x < 28; x += 3) { c.Set(x, 28, White); c.Set(x + 1, 28, White); c.Set(x, 29, White); }
+            for (int x = 14; x < 29; x += 3) { c.Set(x, 32, White); c.Set(x + 1, 32, White); c.Set(x + 1, 31, White); }
+            c.Outline(Ink);
+            return c;
+        }
+
+        // 경험치: 실험 혈청 방울 (흰색으로 그리고 SpriteRenderer.color 로 색을 입힌다)
+        static PixelCanvas PaintXpDrop()
+        {
+            var c = new PixelCanvas(7, 9);
+            Color32 body = new Color32(235, 235, 235, 255), shade = new Color32(170, 170, 180, 255);
+            c.Set(3, 1, body);
+            c.Rect(3, 2, 1, 1, body);
+            c.Rect(2, 3, 3, 1, body);
+            c.Ellipse(3.5f, 5.6f, 2.6f, 2.5f, body);
+            c.Shade(shade, (x, y) => x >= 4 && y >= 6);
+            c.Set(2, 4, White);
+            c.Outline(new Color32(40, 44, 60, 255));
+            return c;
+        }
+    }
+
+    // ==================================================================== 도트 그리기 도구
+
+    // 작은 도트 그림을 코드로 그리는 캔버스. 좌표는 왼쪽 위가 (0, 0)
+    class PixelCanvas
+    {
+        public readonly int w, h;
+        readonly Color32[] px;
+
+        public PixelCanvas(int w, int h)
+        {
+            this.w = w; this.h = h;
+            px = new Color32[w * h];
+        }
+
+        bool Inside(int x, int y) { return x >= 0 && y >= 0 && x < w && y < h; }
+        int Index(int x, int y) { return (h - 1 - y) * w + x; }   // 텍스처는 아래 줄부터 저장된다
+
+        public void Set(int x, int y, Color32 c) { if (Inside(x, y)) px[Index(x, y)] = c; }
+        bool Filled(Color32[] a, int x, int y) { return Inside(x, y) && a[Index(x, y)].a > 0; }
+
+        public void Ellipse(float cx, float cy, float rx, float ry, Color32 c)
+        {
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    float dx = (x + 0.5f - cx) / rx, dy = (y + 0.5f - cy) / ry;
+                    if (dx * dx + dy * dy <= 1f) Set(x, y, c);
+                }
+        }
+
+        public void Rect(int x0, int y0, int rw, int rh, Color32 c)
+        {
+            for (int y = y0; y < y0 + rh; y++)
+                for (int x = x0; x < x0 + rw; x++) Set(x, y, c);
+        }
+
+        // 이미 칠한 곳 중 조건에 맞는 칸만 다시 칠한다
+        public void Shade(Color32 c, System.Func<int, int, bool> where)
+        {
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    if (px[Index(x, y)].a > 0 && where(x, y)) Set(x, y, c);
+        }
+
+        // 칠한 모양 바깥쪽에 1픽셀 외곽선
+        public void Outline(Color32 c)
+        {
+            var before = (Color32[])px.Clone();
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    if (!Filled(before, x, y) && (Filled(before, x - 1, y) || Filled(before, x + 1, y) || Filled(before, x, y - 1) || Filled(before, x, y + 1)))
+                        Set(x, y, c);
+        }
+
+        // silhouette = true 면 모양만 흰색으로 (맞았을 때 번쩍임용)
+        public Sprite ToSprite(float ppu, Vector2 pivot, bool silhouette)
+        {
+            var pixels = (Color32[])px.Clone();
+            if (silhouette)
+                for (int i = 0; i < pixels.Length; i++)
+                    if (pixels[i].a > 0) pixels[i] = new Color32(255, 255, 255, pixels[i].a);
+            var tex = new Texture2D(w, h, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Clamp };
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, w, h), pivot, ppu);
         }
     }
 }
