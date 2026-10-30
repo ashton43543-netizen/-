@@ -176,6 +176,9 @@ namespace ArcaneDrift
         {
             ResetRun();
             state = State.Playing;
+            // 시작하자마자 증강을 하나 고르고 시작한다
+            pendingLevelUps = Tune.StartingAugments;
+            if (pendingLevelUps > 0) OpenLevelUp();
         }
 
         void GoTitle()
@@ -953,10 +956,17 @@ namespace ArcaneDrift
         {
             if (orbs.Count >= Tune.MaxOrbs)
             {
-                // 구슬이 너무 많으면 기존 구슬에 합친다
+                // 구슬이 너무 많으면 떨어진 자리에서 가장 가까운 구슬에 합친다 (멀리 있는 구슬에 합치면 경험치를 사실상 잃는다)
                 var list = orbs.Active;
+                XpOrb nearest = null;
+                float best = float.MaxValue;
                 for (int i = 0; i < list.Count; i++)
-                    if (list[i].alive) { list[i].value += value; ScaleOrb(list[i]); return; }
+                {
+                    if (!list[i].alive) continue;
+                    float d = (list[i].pos - at).sqrMagnitude;
+                    if (d < best) { best = d; nearest = list[i]; }
+                }
+                if (nearest != null) { nearest.value += value; ScaleOrb(nearest); return; }
             }
             var o = orbs.Get();
             o.pos = at + Random.insideUnitCircle * 0.08f;
@@ -1310,7 +1320,7 @@ namespace ArcaneDrift
         void DrawLevelUp()
         {
             Fill(new Rect(0, 0, vw, 720), new Color(0.04f, 0.03f, 0.08f, 0.72f));
-            Text(new Rect(0, 100, vw, 50), "레벨 업!", 38, Palette.Xp, TextAnchor.MiddleCenter, true);
+            Text(new Rect(0, 100, vw, 50), elapsed <= 0f ? "시작 증강" : "레벨 업!", 38, Palette.Xp, TextAnchor.MiddleCenter, true);
             string sub = "증강을 하나 고르세요  (클릭 또는 1~" + cards.Count + ")";
             if (pendingLevelUps > 1) sub += "   ·   남은 선택 " + pendingLevelUps;
             Text(new Rect(0, 150, vw, 26), sub, 16, Palette.Body, TextAnchor.MiddleCenter);
@@ -1367,13 +1377,13 @@ namespace ArcaneDrift
 
         public const float PlayerRadius = 0.15f;
         public const float PlayerSpeed = 2.5f;   // 원본 이속. 아래 PlayerSpeedVsMonster 가 0 일 때만 쓴다
-        // 사용자 요청: 플레이어 이속 = 기본 몬스터(grunt) 이속 × 1.5. 몬스터 이속이 시간에 따라 오르면 같이 오른다.
+        // 사용자 요청: 플레이어 이속 = 기본 몬스터(grunt) 이속 × 1.8. 몬스터 이속이 시간에 따라 오르면 같이 오른다.
         // 0 으로 바꾸면 원본 2.5 로 돌아간다
-        public const float PlayerSpeedVsMonster = 1.5f;
+        public const float PlayerSpeedVsMonster = 1.8f;
         public const float PlayerHp = 100f;
         public const float PlayerDamage = 10f;
         public const float PlayerAspd = 1.1f;
-        public const float PlayerRange = 2.55f;
+        public const float PlayerRange = 2.9f;   // 사용자 요청으로 조금 늘림 (원본 2.55)
         public const float CritChance = 0.05f;
         public const float CritMult = 1.6f;
         public const float BoltSpeed = 5.6f;
@@ -1381,7 +1391,10 @@ namespace ArcaneDrift
 
         public const float XpMagnet = 1.4f;
         public const float XpPickup = 0.34f;
-        public static int XpToNext(int level) { return Mathf.RoundToInt(10 + level * 7 + level * level * 0.6f); }
+        // 원본 곡선 round(10 + lv×7 + lv²×0.6) 에 XpRequirement 를 곱한다 (사용자 요청: 증강을 더 자주)
+        public const float XpRequirement = 0.6f;
+        public static int XpToNext(int level) { return Mathf.Max(1, Mathf.RoundToInt((10 + level * 7 + level * level * 0.6f) * XpRequirement)); }
+        public const int StartingAugments = 1;   // 사용자 요청: 시작하자마자 증강 카드 선택
 
         public const float SpawnMin = 5.6f, SpawnMax = 7.0f;
         public static float SpawnInterval(float t) { return Mathf.Max(0.16f, 1.05f - t * 0.002f); }
