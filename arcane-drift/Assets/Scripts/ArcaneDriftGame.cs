@@ -22,7 +22,7 @@ namespace ArcaneDrift
 {
     public class ArcaneDriftGame : MonoBehaviour
     {
-        enum State { Title, Playing, LevelUp, Paused, GameOver }
+        enum State { Title, Playing, LevelUp, Paused, Info, GameOver }
 
         const string BestTimeKey = "ArcaneDrift.BestTime";
         const string BestKillsKey = "ArcaneDrift.BestKills";
@@ -56,6 +56,7 @@ namespace ArcaneDrift
         PlayerMods mods;
         SkillState[] skills;
         readonly Dictionary<string, int> stacks = new Dictionary<string, int>();
+        readonly List<Augment> pickedOrder = new List<Augment>();   // 고른 순서 (Tab 화면용)
         bool dashing, dashKilled;
 
         // ---- 진행 ----
@@ -63,6 +64,8 @@ namespace ArcaneDrift
         int eliteIndex, bossIndex, kills, level, xpNeed, pendingLevelUps, serial;
         string bannerText = "";
         readonly List<Card> cards = new List<Card>();
+        float cardsReadyAt;
+        bool CardsReady { get { return Time.unscaledTime >= cardsReadyAt; } }
         float bestTime;
         int bestKills;
         bool newRecord;
@@ -155,7 +158,7 @@ namespace ArcaneDrift
             enemies.Clear(); projectiles.Clear(); orbs.Clear(); fxs.Clear(); texts.Clear();
             mods = new PlayerMods();
             skills = new[] { new SkillState(0), new SkillState(1), new SkillState(2) };
-            stacks.Clear(); cards.Clear();
+            stacks.Clear(); cards.Clear(); pickedOrder.Clear();
 
             ppos = Vector2.zero; facing = Vector2.right;
             moveTarget = null; holdMove = false; attackTarget = null;
@@ -187,6 +190,13 @@ namespace ArcaneDrift
             state = State.Title;
         }
 
+        // Tab: 멈추고 지금까지 고른 증강·능력치를 본다
+        void SetInfo(bool open)
+        {
+            state = open ? State.Info : State.Playing;
+            Time.timeScale = open ? 0f : 1f;
+        }
+
         void SetPaused(bool paused)
         {
             state = paused ? State.Paused : State.Playing;
@@ -216,10 +226,14 @@ namespace ArcaneDrift
                     break;
                 case State.Playing:
                     if (GameInput.KeyDown(KeyCode.Escape)) { SetPaused(true); break; }
+                    if (GameInput.KeyDown(KeyCode.Tab)) { SetInfo(true); break; }
                     Step(Mathf.Min(Time.deltaTime, 0.05f));
                     break;
                 case State.Paused:
                     if (GameInput.KeyDown(KeyCode.Escape)) SetPaused(false);
+                    break;
+                case State.Info:
+                    if (GameInput.KeyDown(KeyCode.Tab) || GameInput.KeyDown(KeyCode.Escape)) SetInfo(false);
                     break;
                 case State.LevelUp:
                     for (int i = 0; i < cards.Count && i < 4; i++)
@@ -366,7 +380,7 @@ namespace ArcaneDrift
             attackLock = Tune.AttackLock(aspd);
             attackCount++;
 
-            float dmg = Attack;
+            float dmg = Attack * Tune.BasicDamageBoost;
             SpawnFx(GunTip(), Art.Circle, Palette.Muzzle, 0.16f, 0.04f, 0.08f, 12);
             SpawnBolt(target, dmg, 0f);
             if (mods.multishot > 0)
@@ -1048,6 +1062,7 @@ namespace ArcaneDrift
         void RollCards()
         {
             cards.Clear();
+            cardsReadyAt = Time.unscaledTime + Tune.CardPickDelay;   // 카드 선택 중에는 timeScale = 0 이라 실제 시간으로 잰다
             var pool = new List<Card>();
             var weights = new List<float>();
             var evolves = new List<Card>();
@@ -1095,7 +1110,7 @@ namespace ArcaneDrift
 
         void ChooseCard(int index)
         {
-            if (state != State.LevelUp || index < 0 || index >= cards.Count) return;
+            if (state != State.LevelUp || index < 0 || index >= cards.Count || !CardsReady) return;
             Card c = cards[index];
             switch (c.kind)
             {
@@ -1103,6 +1118,7 @@ namespace ArcaneDrift
                     int have;
                     stacks.TryGetValue(c.augment.id, out have);
                     stacks[c.augment.id] = have + 1;
+                    if (have == 0) pickedOrder.Add(c.augment);
                     // 최대 체력이 늘면 늘어난 만큼 현재 체력도 채운다
                     foreach (var fx in c.augment.effects) hp += AugmentApplier.Apply(mods, fx);
                     break;
@@ -1191,13 +1207,14 @@ namespace ArcaneDrift
             vw = Screen.width / u;
 
             if (state != State.Title) DrawWorldText();
-            if (state == State.Playing || state == State.Paused || state == State.LevelUp) DrawHud();
+            if (state == State.Playing || state == State.Paused || state == State.LevelUp || state == State.Info) DrawHud();
 
             switch (state)
             {
                 case State.Title: DrawTitle(); break;
                 case State.LevelUp: DrawLevelUp(); break;
                 case State.Paused: DrawPause(); break;
+                case State.Info: DrawInfo(); break;
                 case State.GameOver: DrawGameOver(); break;
             }
         }
@@ -1287,7 +1304,7 @@ namespace ArcaneDrift
 
             // 처음 몇 초 동안 조작 안내
             if (elapsed < 12f)
-                Text(new Rect(0, 572, vw, 24), "우클릭: 이동   ·   좌클릭: 공격할 적 지정   ·   Q W E: 스킬 (레벨업 카드로 배움)   ·   Esc: 일시정지", 15, Palette.Muted, TextAnchor.MiddleCenter);
+                Text(new Rect(0, 572, vw, 24), "우클릭: 이동   ·   좌클릭: 공격할 적 지정   ·   Q W E: 스킬   ·   Tab: 내 빌드   ·   Esc: 일시정지", 15, Palette.Muted, TextAnchor.MiddleCenter);
 
             DrawSkills();
 
@@ -1334,7 +1351,7 @@ namespace ArcaneDrift
             if (Button(new Rect(vw / 2f - 120, 340, 240, 56), "시작하기", Palette.ButtonPrimary)) StartRun();
             Text(new Rect(0, 402, vw, 22), "Enter 또는 Space 로도 시작", 14, Palette.Muted, TextAnchor.MiddleCenter);
             Text(new Rect(vw / 2f - 300, 460, 600, 120),
-                "우클릭: 이동   ·   적을 좌클릭: 추격하며 자동 공격\nQ W E: 스킬 (레벨업 카드로 배우고 강화)\n1~4: 카드 선택   ·   Esc: 일시정지",
+                "우클릭: 이동   ·   적을 좌클릭: 추격하며 자동 공격\nQ W E: 스킬 (레벨업 카드로 배우고 강화)\n1~4: 카드 선택   ·   Tab: 내 빌드 보기   ·   Esc: 일시정지",
                 16, Palette.Body, TextAnchor.UpperCenter, false, true);
         }
 
@@ -1346,6 +1363,15 @@ namespace ArcaneDrift
             if (pendingLevelUps > 1) sub += "   ·   남은 선택 " + pendingLevelUps;
             Text(new Rect(0, 150, vw, 26), sub, 16, Palette.Body, TextAnchor.MiddleCenter);
 
+            // 대기 시간 막대: 다 차야 고를 수 있다
+            bool ready = CardsReady;
+            if (!ready)
+            {
+                float k = 1f - Mathf.Clamp01((cardsReadyAt - Time.unscaledTime) / Tune.CardPickDelay);
+                Fill(new Rect(vw / 2f - 120, 180, 240, 6), Palette.Panel);
+                Fill(new Rect(vw / 2f - 120, 180, 240 * k, 6), Palette.Xp);
+            }
+
             const float gap = 18f, ch = 300f;
             int n = cards.Count;
             float cw = Mathf.Min(230f, (vw - 40f - gap * (n - 1)) / n);
@@ -1354,14 +1380,103 @@ namespace ArcaneDrift
             {
                 Card c = cards[i];
                 Rect r = new Rect(x0 + i * (cw + gap), y, cw, ch);
-                bool hover = Scaled(r).Contains(Event.current.mousePosition);
+                bool hover = ready && Scaled(r).Contains(Event.current.mousePosition);
                 Fill(r, hover ? Palette.CardHover : Palette.Card);
                 Fill(new Rect(r.x, r.y, cw, 6), c.color);
                 Text(new Rect(r.x + 16, r.y + 20, cw - 32, 20), c.tag, 13, c.color, TextAnchor.MiddleLeft, true);
                 Text(new Rect(r.x + 16, r.y + 44, cw - 32, 56), c.title, 20, Color.white, TextAnchor.UpperLeft, true, true);
                 Text(new Rect(r.x + 16, r.y + 104, cw - 32, 150), c.desc, 15, Palette.Body, TextAnchor.UpperLeft, false, true, false);
                 Text(new Rect(r.x, r.y + ch - 36, cw, 24), "[" + (i + 1) + "]", 15, Palette.Muted, TextAnchor.MiddleCenter);
+                if (!ready)
+                {
+                    // 대기 중에는 카드를 어둡게 덮고 버튼도 만들지 않는다.
+                    // 버튼이 없으면 대기 중에 누른 클릭이 대기가 끝난 뒤 떼어져도 선택되지 않는다
+                    Fill(r, new Color(0.04f, 0.03f, 0.08f, 0.55f));
+                    continue;
+                }
                 if (GUI.Button(Scaled(r), GUIContent.none, GUIStyle.none)) { ChooseCard(i); break; }
+            }
+        }
+
+        void DrawInfo()
+        {
+            Fill(new Rect(0, 0, vw, 720), new Color(0.04f, 0.03f, 0.08f, 0.86f));
+            Text(new Rect(0, 70, vw, 44), "현재 빌드", 32, Color.white, TextAnchor.MiddleCenter, true);
+            Text(new Rect(0, 112, vw, 22), "일시정지 중   ·   Tab 또는 Esc: 돌아가기", 14, Palette.Muted, TextAnchor.MiddleCenter);
+
+            float colW = Mathf.Min(360f, (vw - 80f) / 3f), gap = 20f;
+            float x0 = (vw - (colW * 3 + gap * 2)) / 2f, y0 = 150f;
+
+            // 1) 능력치
+            float x = x0, y = y0;
+            Text(new Rect(x, y, colW, 26), "능력치", 19, Palette.Xp, TextAnchor.MiddleLeft, true);
+            y += 34;
+            string[,] stats =
+            {
+                { "평타 피해", (Attack * Tune.BasicDamageBoost).ToString("0.#") },
+                { "공격 속도", Aspd.ToString("0.00") + " /초" },
+                { "평타 사거리", Range.ToString("0.0#") },
+                { "이동 속도", MoveSpeed.ToString("0.00") },
+                { "치명타", Mathf.RoundToInt(CritChance * 100) + "%  ×" + CritMult.ToString("0.0#") },
+                { "체력", Mathf.CeilToInt(hp) + " / " + Mathf.RoundToInt(MaxHp) },
+                { "초당 회복", mods.regen.ToString("0.#") },
+                { "받는 피해 감소", mods.armor.ToString("0.#") },
+                { "흡혈", Mathf.RoundToInt(mods.lifesteal * 100) + "%" },
+                { "관통 · 튕김 · 추가탄", mods.pierce + " · " + mods.ricochet + " · " + mods.multishot },
+                { "스킬 피해", "+" + Mathf.RoundToInt(mods.skillDmgPct * 100) + "%" + (mods.synergyFinale ? "  ×1.3" : "") },
+                { "스킬 쿨다운", "×" + mods.SkillCdMult.ToString("0.00") },
+                { "경험치 흡수 범위", (Tune.XpMagnet * (1 + mods.magnetPct)).ToString("0.0") },
+            };
+            for (int i = 0; i < stats.GetLength(0); i++)
+            {
+                Text(new Rect(x, y, colW, 22), stats[i, 0], 15, Palette.Body, TextAnchor.MiddleLeft);
+                Text(new Rect(x, y, colW, 22), stats[i, 1], 15, Color.white, TextAnchor.MiddleRight, true);
+                y += 26;
+            }
+
+            // 2) 스킬
+            x = x0 + colW + gap; y = y0;
+            Text(new Rect(x, y, colW, 26), "스킬", 19, Palette.Skill, TextAnchor.MiddleLeft, true);
+            y += 34;
+            for (int i = 0; i < 3; i++)
+            {
+                var sk = skills[i];
+                string head = SkillState.Keys[i] + "  " + SkillState.Names[i];
+                if (sk.level == 0)
+                {
+                    Text(new Rect(x, y, colW, 24), head, 17, Palette.Locked, TextAnchor.MiddleLeft, true);
+                    Text(new Rect(x, y + 24, colW, 20), "잠김 (레벨업 카드로 배움)", 14, Palette.Locked, TextAnchor.MiddleLeft);
+                }
+                else
+                {
+                    Color c = sk.evolved ? Palette.Legendary : Palette.Skill;
+                    Text(new Rect(x, y, colW, 24), head + "   " + (sk.evolved ? "진화" : "Lv " + sk.level), 17, c, TextAnchor.MiddleLeft, true);
+                    float coef = i == 0 ? Tune.QDamage(sk.level) : i == 1 ? Tune.WDamage(sk.level) : Tune.EDamage(sk.level);
+                    Text(new Rect(x, y + 24, colW, 20), "피해 " + Mathf.RoundToInt(SkillDamage(i, coef)) + "   ·   쿨다운 " + Tune.Cooldown(i, sk.level, mods.SkillCdMult).ToString("0.0") + "초",
+                        14, Palette.Body, TextAnchor.MiddleLeft);
+                }
+                y += 60;
+            }
+            Text(new Rect(x, y + 6, colW, 22), "생존 " + FormatTime(elapsed) + "   ·   처치 " + kills + "   ·   Lv " + level, 14, Palette.Muted, TextAnchor.MiddleLeft);
+
+            // 3) 고른 증강 (고른 순서)
+            x = x0 + (colW + gap) * 2; y = y0;
+            Text(new Rect(x, y, colW, 26), "증강  " + pickedOrder.Count + "종", 19, Palette.Legendary, TextAnchor.MiddleLeft, true);
+            y += 34;
+            if (pickedOrder.Count == 0) Text(new Rect(x, y, colW, 22), "아직 고른 증강이 없어요", 14, Palette.Muted, TextAnchor.MiddleLeft);
+            // 많이 고르면 줄 간격을 줄이고, 그래도 좁으면 설명은 빼고 이름만
+            float row = Mathf.Min(44f, (700f - y) / Mathf.Max(1, pickedOrder.Count));
+            bool showDesc = row >= 34f;
+            for (int i = 0; i < pickedOrder.Count; i++)
+            {
+                var a = pickedOrder[i];
+                int have;
+                stacks.TryGetValue(a.id, out have);
+                Color c = Palette.Rarity[(int)a.rarity];
+                Fill(new Rect(x, y + 3, 4, Mathf.Max(8f, row - 10)), c);
+                Text(new Rect(x + 12, y, colW - 12, 20), a.name + (have > 1 ? "  ×" + have : ""), 15, c, TextAnchor.MiddleLeft, true);
+                if (showDesc) Text(new Rect(x + 12, y + 18, colW - 12, 18), a.desc.Replace("\n", " "), 12, Palette.Body, TextAnchor.MiddleLeft);
+                y += row;
             }
         }
 
@@ -1404,13 +1519,15 @@ namespace ArcaneDrift
         public const float PlayerHp = 100f;
         public const float PlayerDamage = 10f;
         public const float PlayerAspd = 1.1f;
-        public const float PlayerRange = 2.9f;   // 사용자 요청으로 조금 늘림 (원본 2.55)
+        public const float PlayerRange = 3.4f;   // 사용자 요청으로 늘림 (원본 2.55)
+        public const float BasicDamageBoost = 2f;   // 사용자 요청: 평타 피해만 2배 (스킬 피해는 SkillDamageBoost 가 따로 맡는다)
         public const float CritChance = 0.05f;
         public const float CritMult = 1.6f;
         public const float BoltSpeed = 5.6f;
         public static float AttackLock(float aspd) { return Mathf.Min(0.22f, 0.4f / aspd); }
 
-        public const float XpMagnet = 3.5f;   // 사용자 요청: 이 거리 안의 경험치는 알아서 끌려온다. 평타 사거리(2.9)보다 넓게 (원본 1.4)
+        public const float XpMagnet = 4f;   // 사용자 요청: 이 거리 안의 경험치는 알아서 끌려온다. 평타 사거리(3.4)보다 넓게 (원본 1.4)
+        public const float CardPickDelay = 0.7f;   // 카드가 뜨고 이 시간(초) 동안은 클릭·숫자키를 받지 않는다 (공격하다 잘못 누르는 것 방지)
         public const float XpPickup = 0.34f;
         // 원본 곡선 round(10 + lv×7 + lv²×0.6) 에 XpRequirement 를 곱한다 (사용자 요청: 증강을 더 자주)
         public const float XpRequirement = 0.6f;
@@ -1939,6 +2056,7 @@ namespace ArcaneDrift
                 case KeyCode.Return: return kb.enterKey.wasPressedThisFrame;
                 case KeyCode.Space: return kb.spaceKey.wasPressedThisFrame;
                 case KeyCode.Escape: return kb.escapeKey.wasPressedThisFrame;
+                case KeyCode.Tab: return kb.tabKey.wasPressedThisFrame;
                 default: return false;
             }
 #else
