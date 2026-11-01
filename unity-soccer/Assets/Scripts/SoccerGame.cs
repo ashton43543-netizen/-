@@ -8,7 +8,7 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 #endif
 
-// 2-player 3v3 mini soccer, ported from soccer.html.
+// 2-player 3v3 mini soccer, ported from soccer.html. Players are cute pixel characters drawn in code.
 // Drop this file anywhere under Assets and press Play: it builds the pitch, players and camera by itself.
 // Game logic runs in the same "pixel" space as the web version (960x600, y pointing down)
 // and is only converted to world units when drawing.
@@ -20,9 +20,8 @@ public class SoccerGame : MonoBehaviour
     const float PR = 15, BR = 7, MATCH = 180;
     const float PX = 40f;                                           // pixels per world unit
 
-    static readonly Color Red = new Color(1f, .353f, .306f), RedGK = new Color(1f, .65f, .306f);
-    static readonly Color Blue = new Color(.306f, .659f, 1f), BlueGK = new Color(.494f, .878f, .784f);
-    static readonly Color Ink = new Color(.05f, .09f, .07f);
+    static readonly Color Red = new Color(1f, .353f, .306f);
+    static readonly Color Blue = new Color(.306f, .659f, 1f);
     static readonly Color Gold = new Color(1f, .82f, .4f);
 
     struct Controls { public KeyCode up, left, down, right, pass, shoot, curl; }
@@ -36,10 +35,12 @@ public class SoccerGame : MonoBehaviour
     {
         public int team; public bool gk;
         public Vector2 pos, vel, face;
-        public float r, noTouch, gainAt, holdUntil;
-        public Transform body, dot, ring;
+        public float r, noTouch, gainAt, holdUntil, walkTime;
+        public Transform root, ring, shadow;
+        public SpriteRenderer body;
+        public Sprite idle, step;
     }
-    class Ball { public Vector2 pos, vel; public float spin; public Player owner; public Transform tf; }
+    class Ball { public Vector2 pos, vel; public float spin, roll; public Player owner; public Transform tf, shadow; public SpriteRenderer sr; }
     class Team { public int dir; public float ownGoal; public Player active, receiver; public float receiverUntil; }
 
     readonly List<Player> players = new List<Player>();
@@ -483,8 +484,9 @@ public class SoccerGame : MonoBehaviour
         Box(W / 2 - 1.5f, T, 3, B - T, line, 1);
         Piece("centre circle", MakeDisc(256, 1 - 3f / 70f), line, 1, new Vector2(W / 2, H / 2), new Vector2(143, 143));
         Piece("centre spot", disc, line, 1, new Vector2(W / 2, H / 2), new Vector2(8, 8));
-        foreach (var (edge, s) in new[] { (L, 1f), (R, -1f) })
+        for (int side = 0; side < 2; side++)
         {
+            float edge = side == 0 ? L : R, s = side == 0 ? 1f : -1f;
             Outline(s > 0 ? edge : edge - 130, H / 2 - 140, 130, 280, line, 1);
             Outline(s > 0 ? edge : edge - 45, H / 2 - 85, 45, 170, line, 1);
             Piece("penalty spot", disc, line, 1, new Vector2(edge + s * 95, H / 2), new Vector2(7, 7));
@@ -499,42 +501,155 @@ public class SoccerGame : MonoBehaviour
         }
     }
 
+    // ---------- cute pixel players (same 2-head-tall style as Arcane Drift) ----------
+    // Every sprite pixel is SpritePx logical pixels, so the players are drawn bigger than their hit circle.
+    const float SpritePx = 2.8f;
+    const float PlayerPivotY = 0.3f;   // the hit circle centre sits 30% up from the sprite's feet
+
+    static readonly string[] PlayerTop =
+    {
+        "................",
+        ".....KKKKKK.....",
+        "...KKHHHHHHKK...",
+        "..KHHHHHHHHHHK..",
+        ".KHHHHHHHHHHHHK.",
+        ".KHHHHHHHHHHHHK.",
+        "..KHSSSSSSSSHK..",
+        "..KSSSSWESWESK..",
+        "..KSSSSWESWESK..",
+        "..KSSppSSSSpSK..",
+        "...KSSSSSSSSK...",
+        "....KKKKKKKK....",
+        "...KJJJJJJJK....",
+        "..KJJJJNNJJJK...",
+        ".KAjJJJNNJJjAK..",
+        ".KAKJJJJJJJKAK..",
+        "...KPPPPPPPK....",
+    };
+    static readonly string[] LegsIdle = { "...KTTK.KTTK....", "...KOOK.KOOK....", "....KK...KK....." };
+    static readonly string[] LegsStep = { "..KTTK...KTTK...", "..KOOK...KOOK...", "...KK.....KK...." };
+    static readonly string[] BallRows =
+    {
+        "..KKK..",
+        ".KWBWK.",
+        "KWBBBWK",
+        "KWWBWWK",
+        "KBWWWBK",
+        ".KWWWK.",
+        "..KKK..",
+    };
+
+    // jersey, jersey shade, shorts, hair, hands (gloves for keepers)
+    static readonly int[][] Kits =
+    {
+        new[] { 0xFF9F4A, 0xD97A2B, 0x2B2433, 0x8A5A3B, 0xB6F24A },   // red keeper
+        new[] { 0xE5484D, 0xB8323A, 0xF2F2F2, 0x5C3A26, 0xFFD6B0 },   // red 1
+        new[] { 0xE5484D, 0xB8323A, 0xF2F2F2, 0x2B2433, 0xFFD6B0 },   // red 2
+        new[] { 0x3FC7A0, 0x2A9A7A, 0x2B2433, 0x2B2433, 0xB6F24A },   // blue keeper
+        new[] { 0x3E7BD6, 0x2C5AA8, 0x26324F, 0xE8C25A, 0xFFD6B0 },   // blue 1
+        new[] { 0x3E7BD6, 0x2C5AA8, 0x26324F, 0x5C3A26, 0xFFD6B0 },   // blue 2
+    };
+
+    static Color32 Hex32(int rgb) => new Color32((byte)((rgb >> 16) & 0xFF), (byte)((rgb >> 8) & 0xFF), (byte)(rgb & 0xFF), 255);
+
+    static Color32 PixelColor(char c, int[] kit)
+    {
+        switch (c)
+        {
+            case 'K': case 'E': return Hex32(0x1B1530);
+            case 'H': return Hex32(kit[3]);
+            case 'S': return Hex32(0xFFD6B0);
+            case 'p': return Hex32(0xFFA096);
+            case 'W': case 'N': return new Color32(255, 255, 255, 255);
+            case 'J': case 'T': return Hex32(kit[0]);
+            case 'j': return Hex32(kit[1]);
+            case 'P': return Hex32(kit[2]);
+            case 'A': return Hex32(kit[4]);
+            case 'O': case 'B': return Hex32(0x2B2433);
+            default: return new Color32(0, 0, 0, 0);
+        }
+    }
+
+    // Text rows (top row first) -> point-filtered sprite
+    static Sprite PixelSprite(string[] rows, int[] kit, Vector2 pivot)
+    {
+        int w = rows[0].Length, h = rows.Length;
+        var tex = new Texture2D(w, h, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Clamp };
+        var px = new Color32[w * h];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                px[(h - 1 - y) * w + x] = PixelColor(rows[y][x], kit);   // textures store the bottom row first
+        tex.SetPixels32(px); tex.Apply();
+        return Sprite.Create(tex, new Rect(0, 0, w, h), pivot, PX / SpritePx);
+    }
+
+    static string[] Concat(string[] a, string[] b)
+    {
+        var all = new string[a.Length + b.Length];
+        a.CopyTo(all, 0); b.CopyTo(all, a.Length);
+        return all;
+    }
+
+    SpriteRenderer SpriteObject(string name, Sprite s, Color c, int order, Transform parent)
+    {
+        var go = new GameObject(name);
+        go.transform.SetParent(parent, false);
+        var sr = go.AddComponent<SpriteRenderer>();
+        sr.sprite = s; sr.color = c; sr.sortingOrder = order;
+        if (spriteMat != null) sr.sharedMaterial = spriteMat;
+        return sr;
+    }
+
     void CreatePieces()
     {
         var ringSprite = MakeDisc(128, 0.82f);
+        var feet = new Vector2(0.5f, PlayerPivotY);
         for (int t = 0; t < 2; t++)
             for (int i = 0; i < 3; i++)
             {
                 var p = new Player { team = t, gk = i == 0, r = i == 0 ? PR + 1 : PR, face = new Vector2(t == 0 ? 1 : -1, 0) };
-                var root = new GameObject((t == 0 ? "Red " : "Blue ") + (p.gk ? "GK" : "Player " + i)).transform;
-                root.SetParent(transform, false);
-                Color c = p.gk ? (t == 0 ? RedGK : BlueGK) : (t == 0 ? Red : Blue);
-                p.ring = Piece("ring", ringSprite, t == 0 ? Red : Blue, 9, Vector2.zero, Vector2.one * (p.r + 8) * 2, root);
-                Piece("outline", disc, Ink, 10, Vector2.zero, Vector2.one * (p.r * 2 + 4), root);
-                Piece("body", disc, c, 11, Vector2.zero, Vector2.one * p.r * 2, root);
-                p.dot = Piece("facing", disc, Ink, 12, Vector2.zero, new Vector2(6, 6), root);
-                p.body = root;
-                foreach (Transform child in root) if (child != p.dot) child.localPosition = Vector3.zero;
+                p.root = new GameObject((t == 0 ? "Red " : "Blue ") + (p.gk ? "GK" : "Player " + i)).transform;
+                p.root.SetParent(transform, false);
+                int[] kit = Kits[t * 3 + i];
+                p.idle = PixelSprite(Concat(PlayerTop, LegsIdle), kit, feet);
+                p.step = PixelSprite(Concat(PlayerTop, LegsStep), kit, feet);
+                // shadow and "you control this one" ring sit flat around the feet
+                p.shadow = Piece("shadow", disc, new Color(0, 0, 0, .3f), 4, Vector2.zero, new Vector2(34, 12), p.root);
+                p.ring = Piece("ring", ringSprite, t == 0 ? Red : Blue, 5, Vector2.zero, new Vector2(46, 19), p.root);
+                p.shadow.localPosition = p.ring.localPosition = new Vector3(0, -FeetOffset / PX, 0);
+                p.body = SpriteObject("body", p.idle, Color.white, 10, p.root);
                 players.Add(p);
             }
         var b = new GameObject("Ball").transform; b.SetParent(transform, false);
-        Piece("outline", disc, new Color(.13f, .13f, .13f), 20, Vector2.zero, Vector2.one * (BR * 2 + 3), b);
-        Piece("ball", disc, Color.white, 21, Vector2.zero, Vector2.one * BR * 2, b);
-        Piece("patch", disc, new Color(.13f, .13f, .13f), 22, Vector2.zero, new Vector2(5, 5), b);
-        foreach (Transform child in b) child.localPosition = Vector3.zero;
-        ball = new Ball { tf = b };
+        var bs = Piece("shadow", disc, new Color(0, 0, 0, .3f), 4, Vector2.zero, new Vector2(15, 6), transform);
+        var sr = SpriteObject("ball", PixelSprite(BallRows, Kits[0], new Vector2(.5f, .5f)), Color.white, 11, b);
+        ball = new Ball { tf = b, shadow = bs, sr = sr };
     }
+
+    // distance (logical px) from the hit-circle centre down to the feet
+    const float FeetOffset = 20 * SpritePx * PlayerPivotY;
 
     void Render()
     {
         cam.orthographicSize = Mathf.Max(8.2f, 12.6f / Mathf.Max(cam.aspect, 0.1f));
         foreach (var p in players)
         {
-            p.body.position = World(p.pos);
-            p.dot.localPosition = new Vector3(p.face.x, -p.face.y, 0) * ((p.r - 5) / PX);
+            p.root.position = World(p.pos);
+            bool moving = p.vel.sqrMagnitude > 0.04f && state == "play";
+            if (moving) p.walkTime += Time.deltaTime;
+            if (Mathf.Abs(p.face.x) > 0.05f) p.body.flipX = p.face.x < 0;   // drawn facing right
+            p.body.sprite = moving && Mathf.FloorToInt(p.walkTime * 9f) % 2 == 1 ? p.step : p.idle;
+            p.body.transform.localPosition = new Vector3(0, moving ? Mathf.Abs(Mathf.Sin(p.walkTime * 18f)) * 0.06f : 0, 0);
+            p.body.sortingOrder = 10 + Mathf.RoundToInt(p.pos.y / 3f);   // lower on screen = drawn in front
             p.ring.gameObject.SetActive(state == "play" && teams[p.team].active == p);
         }
+        // the ball rolls: spin it by the distance it travelled
+        float speed = ball.owner != null ? ball.owner.vel.magnitude : ball.vel.magnitude;
+        ball.roll -= speed * Time.deltaTime * 60f * 6f * (ball.vel.x + (ball.owner != null ? ball.owner.vel.x : 0) >= 0 ? 1 : -1);
         ball.tf.position = World(ball.pos);
+        ball.tf.rotation = Quaternion.Euler(0, 0, ball.roll);
+        ball.sr.sortingOrder = 11 + Mathf.RoundToInt(ball.pos.y / 3f);
+        ball.shadow.position = World(ball.pos + new Vector2(2, 6));
     }
 
     void OnGUI()
@@ -559,7 +674,7 @@ public class SoccerGame : MonoBehaviour
         {
             bool active = state == "play" && teams[p.team].active == p;
             if (!active && !p.gk) continue;
-            Vector3 sp = cam.WorldToScreenPoint(World(p.pos + new Vector2(0, -p.r - (active ? 14 : 8))));
+            Vector3 sp = cam.WorldToScreenPoint(World(p.pos + new Vector2(0, -(20 * SpritePx * (1 - PlayerPivotY)) - 10)));
             Label(new Rect(sp.x - 30, Screen.height - sp.y - 12, 60, 24), active ? (p.team == 0 ? "1P" : "2P") : "GK", small, active ? Color.white : new Color(1, 1, 1, .75f));
         }
 

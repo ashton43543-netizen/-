@@ -124,6 +124,53 @@ kbd {
   const GT = H / 2 - 70, GB = H / 2 + 70, GD = 32;        // goal mouth and depth
   const PR = 15, BR = 7, MATCH = 180;
   const COLORS = [{ main: '#ff5a4e', gk: '#ffa64e' }, { main: '#4ea8ff', gk: '#7ee0c8' }];
+
+  // Cute pixel players (same 2-head-tall style as the Unity games). Each sprite pixel is SP canvas pixels.
+  const SP = 2.8, PIVOT = 0.3, FEET = 20 * SP * PIVOT;
+  const PLAYER_TOP = [
+    '................', '.....KKKKKK.....', '...KKHHHHHHKK...', '..KHHHHHHHHHHK..', '.KHHHHHHHHHHHHK.', '.KHHHHHHHHHHHHK.',
+    '..KHSSSSSSSSHK..', '..KSSSSWESWESK..', '..KSSSSWESWESK..', '..KSSppSSSSpSK..', '...KSSSSSSSSK...', '....KKKKKKKK....',
+    '...KJJJJJJJK....', '..KJJJJNNJJJK...', '.KAjJJJNNJJjAK..', '.KAKJJJJJJJKAK..', '...KPPPPPPPK....',
+  ];
+  const LEGS_IDLE = ['...KTTK.KTTK....', '...KOOK.KOOK....', '....KK...KK.....'];
+  const LEGS_STEP = ['..KTTK...KTTK...', '..KOOK...KOOK...', '...KK.....KK....'];
+  const BALL_ROWS = ['..KKK..', '.KWBWK.', 'KWBBBWK', 'KWWBWWK', 'KBWWWBK', '.KWWWK.', '..KKK..'];
+  // jersey, jersey shade, shorts, hair, hands (gloves for keepers); order matches players: red GK, red, red, blue GK, blue, blue
+  const KITS = [
+    ['#ff9f4a', '#d97a2b', '#2b2433', '#8a5a3b', '#b6f24a'],
+    ['#e5484d', '#b8323a', '#f2f2f2', '#5c3a26', '#ffd6b0'],
+    ['#e5484d', '#b8323a', '#f2f2f2', '#2b2433', '#ffd6b0'],
+    ['#3fc7a0', '#2a9a7a', '#2b2433', '#2b2433', '#b6f24a'],
+    ['#3e7bd6', '#2c5aa8', '#26324f', '#e8c25a', '#ffd6b0'],
+    ['#3e7bd6', '#2c5aa8', '#26324f', '#5c3a26', '#ffd6b0'],
+  ];
+  function pixelColor(ch, kit) {
+    switch (ch) {
+      case 'K': case 'E': return '#1b1530';
+      case 'H': return kit[3];
+      case 'S': return '#ffd6b0';
+      case 'p': return '#ffa096';
+      case 'W': case 'N': return '#ffffff';
+      case 'J': case 'T': return kit[0];
+      case 'j': return kit[1];
+      case 'P': return kit[2];
+      case 'A': return kit[4];
+      case 'O': case 'B': return '#2b2433';
+      default: return null;
+    }
+  }
+  function makeSprite(rows, kit) {
+    const c = document.createElement('canvas');
+    c.width = rows[0].length; c.height = rows.length;
+    const g = c.getContext('2d');
+    rows.forEach((row, y) => [...row].forEach((ch, x) => {
+      const col = pixelColor(ch, kit);
+      if (col) { g.fillStyle = col; g.fillRect(x, y, 1, 1); }
+    }));
+    return c;
+  }
+  const SPRITES = KITS.map(kit => [makeSprite(PLAYER_TOP.concat(LEGS_IDLE), kit), makeSprite(PLAYER_TOP.concat(LEGS_STEP), kit)]);
+  const BALL_SPRITE = makeSprite(BALL_ROWS, KITS[0]);
   const KEYS = [
     { up: 'KeyW', left: 'KeyA', down: 'KeyS', right: 'KeyD', pass: 'KeyE', shoot: 'KeyR', curl: 'KeyQ' },
     { up: 'KeyI', left: 'KeyJ', down: 'KeyK', right: 'KeyL', pass: 'KeyO', shoot: 'KeyP', curl: 'KeyU' },
@@ -151,6 +198,7 @@ kbd {
   function setup() {
     players = [];
     for (const t of [0, 1]) for (const role of ['gk', 'f', 'f']) players.push(mkPlayer(t, role));
+    players.forEach((p, i) => { p.kit = i; p.flip = p.team === 1; });
     teams = [0, 1].map(t => ({ dir: t ? -1 : 1, ownGoal: t ? R : L, active: null, receiver: null, receiverUntil: 0 }));
     score = [0, 0]; timeLeft = MATCH;
     kickoff(0);
@@ -440,42 +488,61 @@ kbd {
 
   function drawPlayer(p) {
     const c = COLORS[p.team], active = teams[p.team].active === p && state === 'play';
-    ctx.fillStyle = 'rgba(0,0,0,.25)';
-    ctx.beginPath(); ctx.ellipse(p.x + 3, p.y + 5, p.r, p.r * 0.7, 0, 0, Math.PI * 2); ctx.fill();
+    const feetY = p.y + FEET;
+    // shadow, and the "you control this one" ring flat around the feet
+    ctx.fillStyle = 'rgba(0,0,0,.28)';
+    ctx.beginPath(); ctx.ellipse(p.x, feetY, 17, 6, 0, 0, Math.PI * 2); ctx.fill();
     if (active) {
       ctx.strokeStyle = c.main; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.r + 7, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(p.x, feetY, 23, 9.5, 0, 0, Math.PI * 2); ctx.stroke();
     }
-    ctx.fillStyle = p.role === 'gk' ? c.gk : c.main;
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#0d1712'; ctx.lineWidth = 2; ctx.stroke();
-    ctx.fillStyle = '#0d1712';
-    ctx.beginPath(); ctx.arc(p.x + p.fx * (p.r - 5), p.y + p.fy * (p.r - 5), 3, 0, Math.PI * 2); ctx.fill();
+    // the sprite faces right; mirror it when facing left, keep the last direction when moving straight up or down
+    if (Math.abs(p.fx) > 0.05) p.flip = p.fx < 0;
+    const moving = Math.hypot(p.vx, p.vy) > 0.2 && state === 'play';
+    const frame = moving && Math.floor(now * 9 + p.kit) % 2 === 1 ? 1 : 0;
+    const bob = moving ? Math.abs(Math.sin(now * 18 + p.kit)) * 2.4 : 0;
+    const w = 16 * SP, h = 20 * SP;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.translate(p.x, feetY - bob);
+    if (p.flip) ctx.scale(-1, 1);
+    ctx.drawImage(SPRITES[p.kit][frame], -w / 2, -h, w, h);
+    ctx.restore();
     ctx.font = '600 12px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
     if (active) {
       ctx.fillStyle = '#ffffff';
-      ctx.fillText(p.team ? '2P' : '1P', p.x, p.y - p.r - 12);
+      ctx.fillText(p.team ? '2P' : '1P', p.x, feetY - h - 6);
     } else if (p.role === 'gk') {
       ctx.fillStyle = 'rgba(255,255,255,.75)';
-      ctx.fillText('GK', p.x, p.y - p.r - 6);
+      ctx.fillText('GK', p.x, feetY - h - 4);
     }
   }
 
+  let ballRoll = 0, lastBallX = 0;
   function drawBall() {
     ctx.fillStyle = 'rgba(0,0,0,.3)';
-    ctx.beginPath(); ctx.ellipse(ball.x + 2, ball.y + 4, BR, BR * 0.6, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath(); ctx.arc(ball.x, ball.y, BR, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#222'; ctx.lineWidth = 1.5; ctx.stroke();
-    ctx.fillStyle = '#222';
-    ctx.beginPath(); ctx.arc(ball.x, ball.y, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(ball.x + 2, ball.y + 6, BR, BR * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+    // roll by the distance travelled sideways
+    ballRoll += (ball.x - lastBallX) / BR; lastBallX = ball.x;
+    const s = 7 * SP;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.translate(ball.x, ball.y);
+    ctx.rotate(ballRoll);
+    ctx.drawImage(BALL_SPRITE, -s / 2, -s / 2, s, s);
+    ctx.restore();
   }
 
   function draw() {
     drawPitch();
+    // draw back to front so the lower one on screen is in front, the ball included
     const sorted = [...players].sort((a, b) => a.y - b.y);
-    for (const p of sorted) drawPlayer(p);
-    drawBall();
+    let ballDrawn = false;
+    for (const p of sorted) {
+      if (!ballDrawn && p.y + FEET > ball.y + BR) { drawBall(); ballDrawn = true; }
+      drawPlayer(p);
+    }
+    if (!ballDrawn) drawBall();
     if (banner) {
       ctx.fillStyle = 'rgba(8,14,10,.55)'; ctx.fillRect(0, H / 2 - 50, W, 100);
       ctx.fillStyle = '#ffd166'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
