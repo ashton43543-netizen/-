@@ -1887,13 +1887,20 @@ namespace ArcaneDrift
         // ================================================================ 평타 강화 패시브
         // 평타(분열 조각 포함)가 맞을 때마다 터진다. 스킬로는 안 터진다.
 
+        // 평타 강화는 시간이 지날수록 강해진다 (사용자 요청). 1분마다 피해 +15%, 끝없이 오른다
+        float ImbuePower { get { return 1f + elapsed / 60f * Tune.ImbueGrowPerMin; } }
+        float ImbueMinutes { get { return elapsed / 60f; } }
+
         void OnHitImbues(Enemy e, float dmg, bool shard)
         {
             ImbueState s;
+            // 분열 조각은 이미 강해진 피해로 만들어졌으므로 한 번 더 곱하지 않는다
+            if (!shard) dmg *= ImbuePower;
 
             // 처형: 체력이 조금 남은 적은 바로 처치 (보스 제외)
             s = imbues[Imbue.Execute];
-            if (s.level > 0 && e.alive && !e.IsBoss && e.hp <= e.maxHp * Imbue.ExecuteAt(s.level, s.evolved))
+            float executeAt = Imbue.ExecuteAt(s.level, s.evolved) + Mathf.Min(ImbueMinutes * Tune.ExecuteGrowPerMin, Tune.ExecuteGrowMax);
+            if (s.level > 0 && e.alive && !e.IsBoss && e.hp <= e.maxHp * executeAt)
             {
                 Color c = Imbue.Colors[Imbue.Execute];
                 AddText(e.pos + new Vector2(0, e.radius + 0.3f), "처형", c, true, false);
@@ -1991,7 +1998,8 @@ namespace ArcaneDrift
 
             // 분열: 확률로 작은 탄환으로 갈라져 근처 적에게 (조각은 다시 갈라지지 않는다)
             s = imbues[Imbue.Split];
-            if (s.level > 0 && !shard && Random.value < Imbue.SplitChance(s.level, s.evolved))
+            float splitChance = Imbue.SplitChance(s.level, s.evolved) + Mathf.Min(ImbueMinutes * Tune.SplitGrowPerMin, Tune.SplitGrowMax);
+            if (s.level > 0 && !shard && Random.value < splitChance)
             {
                 FindNearby(e.pos, Tune.SplitRange, e);
                 int n = Imbue.SplitCount(s.evolved);
@@ -2606,7 +2614,7 @@ namespace ArcaneDrift
                 y += 35;
             }
             y += 4;
-            Text(new Rect(x, y, colW, 22), "평타 강화  " + OwnedImbues + " / " + Tune.ImbueSlots, 16, Palette.Skill, TextAnchor.MiddleLeft, true);
+            Text(new Rect(x, y, colW, 22), "평타 강화  " + OwnedImbues + " / " + Tune.ImbueSlots + "   ·   시간 보너스 ×" + ImbuePower.ToString("0.00"), 16, Palette.Skill, TextAnchor.MiddleLeft, true);
             y += 24;
             for (int id = 0; id < Imbue.Count; id++)
             {
@@ -2781,6 +2789,11 @@ namespace ArcaneDrift
         // ---- 평타 강화 패시브 (사용자 요청: 평타가 맞으면 전기·불·얼음 같은 효과) ----
         public const int ImbueSlots = 4;
         public const float ImbueUnlockWeight = 80f, ImbueLevelWeight = 70f;
+        // 시간 성장 (사용자 요청) [임시]: 피해는 분당 +15% 끝없이, 처형 기준은 분당 +1%p(최대 +10%p), 분열 확률은 분당 +3%p(최대 +30%p)
+        public const float ImbueGrowPerMin = 0.15f;
+        public const float ExecuteGrowPerMin = 0.01f, ExecuteGrowMax = 0.10f;
+        public const float SplitGrowPerMin = 0.03f, SplitGrowMax = 0.30f;
+
         public const float DotTick = 0.5f, BurnDotTime = 3f, VenomTime = 4f, VenomSpread = 1.8f;
         public const float InfernoRadius = 0.8f, InfernoRatio = 3f;
         public const float FrostDotSlowTime = 1.5f, FrostFreezeTime = 0.9f, ShatterRadius = 0.8f;
@@ -3505,7 +3518,7 @@ namespace ArcaneDrift
 
         public static Card ImbueUnlock(int id)
         {
-            return new Card { kind = CardKind.ImbueUnlock, imbue = id, title = Imbue.Names[id], tag = "새 평타 강화 · 패시브", desc = Imbue.What[id] + "\n\n" + Imbue.Stats(id, 1), color = Imbue.Colors[id] };
+            return new Card { kind = CardKind.ImbueUnlock, imbue = id, title = Imbue.Names[id], tag = "새 평타 강화 · 패시브", desc = Imbue.What[id] + "\n\n" + Imbue.Stats(id, 1) + "\n시간이 지날수록 강해집니다 (1분마다 피해 +15%)", color = Imbue.Colors[id] };
         }
 
         public static Card ImbueLevel(int id, int lv)
