@@ -80,11 +80,11 @@ namespace ArcaneDrift
         readonly HashSet<Enemy> chainSet = new HashSet<Enemy>();
         readonly HashSet<Enemy> dashSet = new HashSet<Enemy>();
 
-        // ---- 추가 스킬 (R A S D F 키로 쓰는 스킬) ----
+        // ---- 스킬 (Q W E R 칸에 11종 중 4개) ----
         readonly SpellState[] spells = new SpellState[Spell.Count];
         readonly int[] slotSpell = new int[Tune.SpellSlots];   // 칸마다 들어 있는 스킬 번호 (-1 = 빈 칸)
-        static readonly KeyCode[] SlotKeys = { KeyCode.R, KeyCode.A, KeyCode.S, KeyCode.D, KeyCode.F };
-        static readonly string[] SlotNames = { "R", "A", "S", "D", "F" };
+        static readonly KeyCode[] SlotKeys = { KeyCode.Q, KeyCode.W, KeyCode.E, KeyCode.R };
+        static readonly string[] SlotNames = { "Q", "W", "E", "R" };
         SpriteRenderer barrierSr;
 
         // ---- 평타 강화 패시브 (평타가 맞을 때 터지는 효과) ----
@@ -340,9 +340,12 @@ namespace ArcaneDrift
                 }
             }
 
-            if (GameInput.KeyDown(KeyCode.Q)) CastQ(cursor);
-            if (GameInput.KeyDown(KeyCode.W)) CastW();
-            if (GameInput.KeyDown(KeyCode.E)) CastE(cursor);
+            if (Tune.UseBasicSkills)
+            {
+                if (GameInput.KeyDown(KeyCode.Q)) CastQ(cursor);
+                if (GameInput.KeyDown(KeyCode.W)) CastW();
+                if (GameInput.KeyDown(KeyCode.E)) CastE(cursor);
+            }
             for (int k = 0; k < Tune.SpellSlots; k++)
                 if (slotSpell[k] >= 0 && GameInput.KeyDown(SlotKeys[k])) CastSpell(slotSpell[k], cursor);
         }
@@ -623,8 +626,8 @@ namespace ArcaneDrift
             }
         }
 
-        // ================================================================ 추가 스킬 (R A S D F)
-        // 레벨업 카드로 배우면 빈 칸(R A S D F 순서)에 들어간다. 키를 누르면 쓰고, Lv 5 다음에 진화 카드가 나온다.
+        // ================================================================ 스킬 (Q W E R)
+        // 11종 중 레벨업 카드로 배우면 빈 칸(Q W E R 순서)에 들어간다. 키를 누르면 쓰고, Lv 5 다음에 진화 카드가 나온다.
         // 대부분 커서 쪽을 노린다 (냉기 폭발·마력 방벽은 내 주위, 표창·레이저는 잠시 켜지는 스킬).
 
         float SkillPower
@@ -2104,7 +2107,7 @@ namespace ArcaneDrift
                 pool.Add(Card.ForAugment(a, have));
                 weights.Add(Tune.RarityWeight[(int)a.rarity]);
             }
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < 3 && Tune.UseBasicSkills; i++)
             {
                 var s = skills[i];
                 if (s.level == 0) { pool.Add(Card.Unlock(i)); weights.Add(Tune.SkillUnlockWeight); }
@@ -2373,7 +2376,8 @@ namespace ArcaneDrift
 
             // 처음 몇 초 동안 조작 안내
             if (elapsed < 12f)
-                Text(new Rect(0, 538, vw, 24), "우클릭: 이동   ·   좌클릭: 공격할 적 지정   ·   Q W E R A S D F: 스킬   ·   Tab: 내 빌드   ·   Esc: 일시정지", 15, Palette.Muted, TextAnchor.MiddleCenter);
+                Text(new Rect(0, 538, vw, 24), "우클릭: 이동   ·   좌클릭: 공격할 적 지정   ·   Q W E R: 스킬   ·   Tab: 내 빌드   ·   Esc: 일시정지"
+, 15, Palette.Muted, TextAnchor.MiddleCenter);
 
 
             DrawSkills();
@@ -2384,13 +2388,15 @@ namespace ArcaneDrift
             Fill(new Rect(0, 710, vw * Mathf.Clamp01(xp / xpNeed), 10), Palette.Xp);
         }
 
-        // 아래쪽 스킬 칸: Q W E (기본 스킬) + R A S D F (추가 스킬)
+        // 아래쪽 스킬 칸: (기본 스킬을 켜면 그 3칸) + Q W E R
         void DrawSkills()
         {
             const float size = 60f, gap = 10f, split = 22f;
-            float total = size * 8 + gap * 6 + split;
+            int basics = Tune.UseBasicSkills ? 3 : 0;
+            int boxes = basics + Tune.SpellSlots;
+            float total = size * boxes + gap * (boxes - 1) + (basics > 0 ? split - gap : 0f);
             float x = (vw - total) / 2f, y = 620f;
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < basics; i++)
             {
                 var s = skills[i];
                 Rect r = new Rect(x, y, size, size);
@@ -2409,7 +2415,7 @@ namespace ArcaneDrift
                     Text(new Rect(r.x, r.y + 2, size - 4, 18), "×" + (s.stock > 0 ? s.stock : 1 + mods.eCharges), 12, Palette.Marker, TextAnchor.UpperRight, true);
                 Text(new Rect(r.x - 10, r.y + size + 2, size + 20, 18), s.evolved ? "진화" : "Lv " + s.level, 12, c, TextAnchor.UpperCenter, true);
             }
-            x += split - gap;
+            if (basics > 0) x += split - gap;
             for (int k = 0; k < Tune.SpellSlots; k++)
             {
                 Rect r = new Rect(x, y, size, size);
@@ -2480,7 +2486,7 @@ namespace ArcaneDrift
             if (Button(new Rect(vw / 2f - 120, 340, 240, 56), "시작하기", Palette.ButtonPrimary)) StartRun();
             Text(new Rect(0, 402, vw, 22), "Enter 또는 Space 로도 시작", 14, Palette.Muted, TextAnchor.MiddleCenter);
             Text(new Rect(vw / 2f - 300, 460, 600, 120),
-                "우클릭: 이동   ·   적을 좌클릭: 추격하며 자동 공격\nQ W E + R A S D F: 스킬 (레벨업 카드로 배우고 강화)   ·   평타 강화 패시브는 평타가 맞으면 발동\n1~4: 카드 선택   ·   Tab: 내 빌드 보기   ·   Esc: 일시정지",
+                "우클릭: 이동   ·   적을 좌클릭: 추격하며 자동 공격\nQ W E R: 스킬 11종 중 4개 (레벨업 카드로 배우고 강화)   ·   평타 강화 패시브는 평타가 맞으면 발동\n1~4: 카드 선택   ·   Tab: 내 빌드 보기   ·   Esc: 일시정지",
                 16, Palette.Body, TextAnchor.UpperCenter, false, true);
         }
 
@@ -2567,7 +2573,7 @@ namespace ArcaneDrift
             x = x0 + colW + gap; y = y0;
             Text(new Rect(x, y, colW, 26), "스킬", 19, Palette.Skill, TextAnchor.MiddleLeft, true);
             y += 34;
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < 3 && Tune.UseBasicSkills; i++)
             {
                 var sk = skills[i];
                 string head = SkillState.Keys[i] + "  " + SkillState.Names[i];
@@ -2586,7 +2592,7 @@ namespace ArcaneDrift
                 }
                 y += 44;
             }
-            Text(new Rect(x, y, colW, 22), "추가 스킬  " + OwnedSpells + " / " + Tune.SpellSlots, 16, Palette.Skill, TextAnchor.MiddleLeft, true);
+            Text(new Rect(x, y, colW, 22), "배운 스킬  " + OwnedSpells + " / " + Tune.SpellSlots, 16, Palette.Skill, TextAnchor.MiddleLeft, true);
             y += 24;
             for (int k = 0; k < Tune.SpellSlots; k++)
             {
@@ -2756,9 +2762,12 @@ namespace ArcaneDrift
         public const float BulletSpeed = 2.4f, BulletRadius = 0.08f, BulletDamageRatio = 0.5f, BulletLife = 5f;
         public const float SkillUnlockWeight = 110f, SkillLevelWeight = 75f;   // 증강 사이에서 스킬 카드가 너무 드물게 나오지 않도록
 
-        // ---- 추가 스킬 R A S D F (사용자 요청: 원래 자동 발동 패시브 8종 → 키로 쓰는 스킬 11종) ----
-        public const int SpellSlots = 5;                      // 칸 수 = 키 수 (R A S D F)
-        public const float SpellUnlockWeight = 55f, SpellLevelWeight = 75f;   // 11종이라 하나하나는 낮게 (합치면 증강보다 자주)
+        // ---- 스킬 Q W E R (사용자 요청: 원래 자동 발동 패시브 8종 → 키로 쓰는 스킬 11종, 그중 4개를 골라 씀) ----
+        public const int SpellSlots = 4;                      // 칸 수 = 키 수 (Q W E R)
+        public const float SpellUnlockWeight = 65f, SpellLevelWeight = 90f;   // 11종이라 하나하나는 낮게 (합치면 증강보다 자주)
+        // 원래 Q·W·E 기본 스킬(아케인 볼트·공허의 파동·섬광 돌진). 사용자 요청으로 끔 (2026-11-02).
+        // true 로 바꾸면 다시 나오지만 키가 겹치므로 SlotKeys 도 바꿔야 한다
+        public static readonly bool UseBasicSkills = false;   // const 가 아닌 이유: const 면 "도달할 수 없는 코드" 경고가 뜬다
         public const float SpellEvolveDamage = 1.5f;
         public const float SpellCastBoost = 1.3f;             // 자동 발동이 아니라 직접 써야 해서 쿨다운을 늘린 대신 피해 ×1.3
         public const float SpellCastRange = 7f;               // 커서가 이보다 멀면 이 거리까지만
@@ -3109,7 +3118,7 @@ namespace ArcaneDrift
     {
         public int level;        // 0 = 없음
         public bool evolved;
-        public int slot = -1;    // 들어 있는 칸 (R=0 A=1 S=2 D=3 F=4)
+        public int slot = -1;    // 들어 있는 칸 (Q=0 W=1 E=2 R=3)
         public float timer;      // 남은 쿨다운
         public float cdTotal = 1f;
         public float active;     // 표창·레이저가 켜져 있는 남은 시간
@@ -3390,8 +3399,8 @@ namespace ArcaneDrift
                 new Augment("longCast", "지속 강화", Rarity.Common, 3, "장판·레이저·감속 지속시간 +25%", E(ModOp.SkillDuration, 0.25f)),
                 new Augment("cycle", "순환", Rarity.Common, 4, "모든 스킬 쿨다운 -8%", E(ModOp.SkillCdCut, 0.08f)),
                 new Augment("overload", "마력 과부하", Rarity.Advanced, 4, "모든 스킬 피해 +20%", E(ModOp.SkillDmgPct, 0.2f)),
-                new Augment("multicast", "다중 시전", Rarity.Rare, 2, "Q 볼트·표창·번개·웅덩이·미사일·레이저·운석 개수 +1", E(ModOp.SkillAmount, 1)),
-                new Augment("resonance", "원소 공명", Rarity.Legendary, 1, "R A S D F 스킬을 3개 이상 배웠으면 모든 스킬 피해 +35%", E(ModOp.Resonance, 1)),
+                new Augment("multicast", "다중 시전", Rarity.Rare, 2, "표창·번개·웅덩이·미사일·레이저·운석 개수 +1", E(ModOp.SkillAmount, 1)),
+                new Augment("resonance", "원소 공명", Rarity.Legendary, 1, "스킬을 3개 이상 배웠으면 모든 스킬 피해 +35%", E(ModOp.Resonance, 1)),
                 // ---- 스킬 증강: Q ----
                 NeedsSkill(0, new Augment("qTriple", "삼연발", Rarity.Rare, 1, "Q 아케인 볼트를 부채꼴로 3발 쏩니다", E(ModOp.QTriple, 1))),
                 NeedsSkill(0, new Augment("qGiant", "거대 볼트", Rarity.Advanced, 1, "Q 볼트 크기 +80%, 피해 +25%", E(ModOp.QGiant, 1))),
@@ -3404,7 +3413,7 @@ namespace ArcaneDrift
                 NeedsSkill(2, new Augment("eCharge", "연속 돌진", Rarity.Rare, 1, "E를 쿨다운 없이 한 번 더 쓸 수 있습니다 (충전 2회)", E(ModOp.ECharge, 1))),
                 NeedsSkill(2, new Augment("eBlast", "잔상 폭발", Rarity.Rare, 1, "E로 지나간 길이 0.3초 뒤 폭발합니다 (E 피해의 60%)", E(ModOp.EAfterBlast, 1))),
                 NeedsSkill(2, new Augment("eGuard", "무적 돌진", Rarity.Advanced, 1, "E를 쓰고 0.8초 동안 피해를 받지 않습니다", E(ModOp.EGuard, 1))),
-                // ---- 스킬 증강: R A S D F 스킬 ----
+                // ---- 스킬 증강: Q W E R 스킬 ----
                 NeedsSpell(Spell.Shuriken, new Augment("shurikenMore", "표창 추가", Rarity.Advanced, 2, "회전 표창 +2개", E(ModOp.SpellExtra, 2, Spell.Shuriken))),
                 NeedsSpell(Spell.Shuriken, new Augment("shurikenFast", "고속 회전", Rarity.Common, 1, "표창 회전 속도 +60%, 피해 +20%", E(ModOp.ShurikenFast, 1))),
                 NeedsSpell(Spell.Shuriken, new Augment("shurikenWide", "넓은 궤도", Rarity.Common, 2, "표창 궤도 +30%", E(ModOp.SpellSize, 0.3f, Spell.Shuriken))),
